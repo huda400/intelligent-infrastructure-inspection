@@ -1,0 +1,16 @@
+# Virtual environments
+.venv/
+.venv-*/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Model weights
+*.pt
+
+# Local YOLO dataset archive
+yolo_crack.zip
+
+# Local experiment outputs
+runs/
