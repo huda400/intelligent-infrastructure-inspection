@@ -1,467 +1,961 @@
 # Intelligent Infrastructure Inspection System
 
-> A computer vision pipeline for automated crack detection and segmentation in infrastructure images, with emphasis on dataset quality, annotation reliability, reproducible data preparation, model comparison, and error analysis.
+A computer vision pipeline for automated crack detection and segmentation in infrastructure images, with emphasis on **dataset quality, annotation reliability, reproducible dataset preparation, model comparison, pixel-level evaluation, and error analysis**.
 
-## Overview
+The project goes beyond simply training a segmentation model. It investigates the original dataset, identifies annotation issues, constructs a controlled YOLO segmentation dataset, compares multiple training configurations, selects an operating confidence threshold using validation data, and evaluates generalization across multiple crack-image sources.
 
-Infrastructure inspection datasets can contain more than just clean image-mask pairs. Inconsistent directory structures, empty masks, ambiguous annotations, and domain differences can significantly affect model training and evaluation.
+---
 
-This project investigates the complete pipeline rather than treating model training as the only objective:
+## Project Workflow
 
-**Dataset Audit → Annotation Investigation → Dataset Construction → YOLO Segmentation → Training → Pixel-Level Evaluation → Error Analysis**
-
-The goal is to build a reproducible and evidence-driven crack segmentation workflow and understand **where the model performs well, where it fails, and why**.
+```text
+Dataset Audit
+     ↓
+Annotation Investigation
+     ↓
+Dataset Construction
+     ↓
+YOLO Segmentation Conversion
+     ↓
+Dataset Validation
+     ↓
+Model Training
+     ↓
+Validation-Based Model Comparison
+     ↓
+Confidence Threshold Selection
+     ↓
+Held-Out Test Evaluation
+     ↓
+Source-Level Error Analysis
+```
 
 ---
 
 ## Key Highlights
 
-* Audited **11,298 images and 11,298 masks** at 448 × 448 resolution.
-* Identified a split-level organization issue in the original dataset without discarding valid image-mask pairs.
-* Verified **0 missing image-mask pairs globally**.
-* Investigated **1,454 empty masks**, including **1,411 confirmed `noncrack` cases**.
-* Built a reproducible YOLO segmentation dataset using a **global mask lookup**.
-* Locked the original test set before constructing the training and validation splits.
-* Used a fixed **20% validation ratio** and random seed **42**.
-* Compared a baseline against three targeted experiments:
+* Audited an original dataset containing **11,298 images and 11,298 masks**.
+* Verified global image-mask pairing with **0 images without masks and 0 masks without images**.
+* Investigated **1,454 empty masks**:
 
-  * Small-crack focused augmentation
-  * No-Mosaic ablation
-  * Crack-focused cropping
-* Evaluated models using both standard segmentation metrics and custom pixel-level IoU/Dice measurements.
-* Performed held-out test analysis and source-domain error analysis.
-* Identified **Rissbilder** as the dominant source among missed test crack images.
+  * 1,411 correspond to filenames containing `noncrack`
+  * 43 remain ambiguous and require further inspection.
+* Used a global filename lookup to recover valid masks despite inconsistencies in the original train directory.
+* Constructed a controlled working dataset of **5,188 images**:
 
----
+  * 2,796 training images
+  * 697 validation images
+  * 1,695 test images
+* Used a deterministic **20% validation split with seed 42** within each training class.
+* Converted binary masks to YOLO segmentation polygons using a fixed threshold of **>127**.
+* Trained and compared four configurations:
 
-## 1. Problem
+  * Baseline
+  * Exp1
+  * Exp2
+  * Exp3
+* Used **YOLO11s-seg** with pretrained weights.
+* Selected the final operating confidence threshold using **validation data only**.
+* Final validation threshold: **0.07**.
+* Final held-out test result at confidence 0.07:
 
-Cracks in infrastructure surfaces can vary significantly in:
-
-* Size
-* Thickness
-* Shape
-* Contrast
-* Texture
-* Orientation
-* Background appearance
-* Image source and acquisition conditions
-
-This makes crack segmentation a challenging computer vision problem, particularly when cracks occupy only a small portion of an image.
-
-A strong solution therefore requires more than selecting a segmentation architecture. The dataset must first be understood, cleaned logically, converted correctly, validated, and evaluated using metrics that reflect the actual inspection problem.
+  * Mean per-image crack IoU: **0.3719**
+  * Mean per-image crack Dice: **0.4907**
+  * Crack-image detection rate: **88.33%**
+* Rissbilder represents only **38.5% of crack images in the test set (567 / 1,474)**, but accounts for **79.07% of all missed crack images**.
 
 ---
 
-## 2. Dataset Investigation
+# 1. Dataset Audit
 
-The original dataset contained:
+## Original Dataset
+
+The original dataset contains:
 
 * **11,298 images**
 * **11,298 masks**
-* JPG format
-* **448 × 448** resolution
+* Image format: JPG
+* Resolution: **448 × 448**
 
-The original directory structure contained an important inconsistency: the train directory did not contain all expected local masks. Instead of assuming those images were invalid, the dataset was investigated globally.
+The initial audit revealed a major inconsistency in the local directory structure:
 
-### Audit Results
+```text
+train/images → 2,294 images
+train/masks  → only 9 masks
+```
 
-| Check                |   Result  |
-| :------------------- | :-------: |
-| Images               |   11,298  |
-| Masks                |   11,298  |
-| Images without masks |     0     |
-| Masks without images |     0     |
-| Unreadable files     |     0     |
-| Dimension mismatches |     0     |
-| Image resolution     | 448 × 448 |
-| Original test images |   1,695   |
+A local directory-only comparison would therefore incorrectly suggest that most training images were missing annotations.
 
-The investigation showed that the apparent missing-mask problem was primarily a **directory organization issue**, not a globally incomplete dataset.
+Instead, a **global filename-based lookup** was performed across the available mask files.
 
-This led to a key engineering decision:
+The global pairing check found:
 
-> Preserve the original source dataset and construct the working dataset using a global image-to-mask lookup rather than deleting images based only on their original directory location.
+```text
+Images without masks: 0
+Masks without images: 0
+```
+
+This showed that the apparent mismatch was primarily a directory-organization issue rather than a global absence of annotations.
+
+### Important qualification
+
+The audit's "unreadable image" check was based on opening image headers and validating dimensions. It does **not** constitute a full pixel-level decompression/integrity test for every file.
 
 ---
 
-## 3. Annotation Investigation
-
-### Empty Masks
+# 2. Empty Mask Investigation
 
 A total of:
 
-**1,454 empty masks**
+```text
+1,454 empty masks
+```
 
 were identified.
 
 Among them:
 
-* **1,411** were associated with filenames beginning with `noncrack_`
-* This represents **97.04%** of all empty masks.
-* The remaining **43** empty masks were treated as ambiguous rather than automatically classified as background.
+```text
+1,411 filenames contain "noncrack"
+43 empty masks remain ambiguous
+```
+
+Therefore:
+
+```text
+1,411 / 1,454 = 97.04%
+```
+
+of the empty masks were strongly associated with intentional background images.
+
+The remaining 43 empty masks were not automatically assumed to be background. They were treated as ambiguous rather than silently relabeled.
 
 This distinction was important because an empty mask can represent either:
 
-1. A genuine background/non-crack image
-2. An annotation issue
-3. An ambiguous sample requiring further investigation
-
-The pipeline therefore used conservative rules when selecting confirmed background images.
-
-### Mask Threshold
-
-Binary crack masks were converted using a threshold of:
-
-**127**
-
-Pixels above the threshold were treated as foreground crack pixels.
+* a true background image, or
+* an annotation that failed to capture an existing crack.
 
 ---
 
-## 4. Dataset Construction
+# 3. Working Dataset Construction
 
-The YOLO dataset was constructed programmatically rather than manually reorganizing files.
+After auditing the original dataset, a controlled working dataset was constructed.
 
-### Construction Strategy
+| Split      | Crack Images | Background Images | Total     |
+| ---------- | ------------ | ----------------- | --------- |
+| Train      | 1,836        | 960               | 2,796     |
+| Validation | 458          | 239               | 697       |
+| Test       | 1,474        | 221               | 1,695     |
+| **Total**  | **3,768**    | **1,420**         | **5,188** |
 
-The preparation pipeline:
+The split was performed class-wise, with approximately **20% of the available training examples reserved for validation** using a deterministic random seed of **42**.
 
-1. Builds a global image-to-mask lookup.
-2. Locks the original test set first.
-3. Identifies positive crack images.
-4. Identifies confirmed `noncrack` background images.
-5. Splits the available training candidates into train and validation sets.
-6. Uses a fixed random seed of **42**.
-7. Converts binary masks into YOLO segmentation polygons.
-8. Generates the YOLO `data.yaml`.
-9. Validates the resulting annotations.
-10. Checks for train/validation/test leakage.
+The test set was preserved separately and was not used for threshold selection.
 
-### Final Working Split
+### Dataset utilization
 
-| Split          | Positive Images | Background Images | Total Images |
-| :------------- | --------------: | ----------------: | -----------: |
-| **Train**      |           1,836 |               960 |        2,796 |
-| **Validation** |             458 |               239 |          697 |
-| **Test**       |           1,474 |               221 |        1,695 |
-| **Total**      |       **3,768** |         **1,420** |    **5,188** |
+The original dataset contained 11,298 images, while the current working dataset contains 5,188 images.
 
-The training and validation background proportions were highly consistent:
+Therefore:
 
-* Train: **34.33%**
-* Validation: **34.29%**
-* Difference: **0.04 percentage points**
+```text
+11,298 - 5,188 = 6,110
+```
 
-This provides a closely matched background composition between the training and validation sets.
+original images are not currently included in the working dataset.
+
+This is an important limitation and should be investigated before claiming that the final model represents the full original dataset.
 
 ---
 
-## 5. YOLO Segmentation Pipeline
+# 4. Dataset Source Distribution
 
-The project uses YOLO segmentation annotations where each object is represented by a class ID followed by normalized polygon coordinates.
+The training and validation sets are dominated by two sources:
 
-The dataset preparation pipeline includes:
+| Source              | Train | Validation |
+| ------------------- | ----- | ---------- |
+| CRACK500            | 1,758 | 436        |
+| CFD                 | 78    | 22         |
+| Other crack sources | 0     | 0          |
 
-* Binary mask thresholding
-* Connected foreground extraction
-* Contour extraction
-* Polygon generation
-* Coordinate normalization
-* YOLO label generation
-* Empty-label support for background images
-* Dataset YAML generation
-* Annotation validation
+The test set contains substantially more source diversity:
 
-### Validation Checks
+| Test Source    | Crack Images |
+| -------------- | ------------ |
+| CRACK500       | 505          |
+| CFD            | 18           |
+| Rissbilder     | 567          |
+| GAPS384        | 76           |
+| Volker         | 148          |
+| DeepCrack      | 78           |
+| CrackTree200   | 31           |
+| Sylvie Chambon | 25           |
+| Eugen Muller   | 8            |
+| forest         | 18           |
+| **Total**      | **1,474**    |
 
-The validation script checks for:
+This means the validation set is primarily **dominated by the training-source distribution**, while the test set introduces substantial **cross-dataset / unseen-source variation**.
 
-* Missing labels
-* Unexpected labels
-* Malformed annotation lines
-* Invalid class IDs
-* Coordinates outside `[0, 1]`
-* Invalid annotation structure
-* Empty labels
-* Split integrity
-
-Empty labels are intentionally allowed for background-only images.
-
-A separate leakage check verifies that image stems do not overlap between:
-
-* Train
-* Validation
-* Test
+In particular, Rissbilder, GAPS384, Volker, DeepCrack, CrackTree200, Sylvie Chambon, Eugen Muller, and forest are not represented in the training or validation positives.
 
 ---
 
-## 6. Model and Training Strategy
+# 5. Train/Validation/Test Leakage Check
 
-The project uses a pretrained **YOLO11s-seg** architecture.
+A filename-stem overlap check was performed between the dataset splits.
 
-Training was performed in **Google Colab using a Tesla T4 GPU**, while the local machine was used for dataset investigation, preparation, validation, and engineering tasks.
+No direct filename overlap was found across the evaluated splits.
 
-### Training Configuration
+However, this check is **filename-based only**.
 
-| Parameter          | Value       |
-| :----------------- | :---------- |
-| Architecture       | YOLO11s-seg |
-| Image Size         | 448 × 448   |
-| Batch Size         | 16          |
-| Epochs             | 50          |
-| Patience           | 15          |
-| Optimizer          | AdamW       |
-| Learning Rate      | 0.002       |
-| Momentum           | 0.9         |
-| Workers            | 2           |
-| Random Seed        | 42          |
-| Pretrained Weights | Yes         |
+It does not detect:
 
----
+* duplicate image content,
+* near-duplicate images,
+* sibling tiles originating from the same parent image,
+* visually similar images with different filenames.
 
-## 7. Experiment Design
+This is particularly relevant for datasets such as CRACK500, where filenames can encode relationships between image tiles.
 
-Four training configurations were investigated.
+A stronger future leakage analysis should include:
 
-### Baseline
+* image perceptual hashes,
+* duplicate detection,
+* parent-image grouping where available,
+* source-aware splitting.
 
-The baseline provides a reference point for evaluating subsequent changes.
-
-### Experiment 1 — Small-Crack Focused Augmentation
-
-Additional augmentation was investigated with the goal of improving robustness to small and visually subtle cracks.
-
-### Experiment 2 — No-Mosaic Ablation
-
-Mosaic augmentation was removed to investigate its contribution to crack segmentation performance.
-
-### Experiment 3 — Crack-Focused Cropping
-
-Crack-focused cropping was introduced to provide the model with more localized views of crack regions and increase the representation of small crack structures.
-
-The experiments were designed as controlled engineering comparisons rather than simply searching for the highest score.
+The possibility of related CRACK500 tiles across splits also means that validation performance may be somewhat optimistic.
 
 ---
 
-## 8. Validation Results
+# 6. Mask-to-YOLO Conversion
 
-All experiments were evaluated on the same **697-image validation set**, containing:
+Binary masks were converted into YOLO segmentation polygons.
 
-* 458 crack-containing images
-* 239 background images
+The foreground threshold was:
 
-| Model / Experiment       | Crack mIoU | Crack Dice | Miss Rate | False Positives | Mask mAP50 | Mask mAP50-95 |
-| :----------------------- | :--------: | :--------: | :-------: | :-------------: | :--------: | :-----------: |
-| **Baseline**             |   0.5588   |   0.6859   |   6.77%   |        0        |    0.319   |     0.0969    |
-| **Exp 1 — Augmentation** |   0.5677   |   0.6992   |   3.93%   |        1        |    0.327   |     0.0986    |
-| **Exp 2 — No-Mosaic**    |   0.5507   |   0.6782   |   7.42%   |        0        |    0.310   |     0.0937    |
-| **Exp 3 — Cropping**     | **0.5691** |   0.6976   |   5.02%   |        3        |    0.323   |   **0.1010**  |
+```text
+pixel > 127
+```
 
-### What the Results Suggest
+The conversion process:
 
-#### Augmentation
+1. Load binary mask.
+2. Convert pixels above the threshold to foreground.
+3. Extract external contours.
+4. Convert contour coordinates to normalized YOLO coordinates.
+5. Write class `0` segmentation polygons.
 
-Experiment 1 improved over the baseline in:
+The resulting labels use:
 
-* Crack mIoU
-* Crack Dice
-* Miss rate
-* Mask mAP50
-* Mask mAP50-95
+```text
+class_id x1 y1 x2 y2 ... xn yn
+```
 
-The number of missed crack images decreased from:
+with normalized coordinates in the range:
 
-**31 → 18**
+```text
+0–1
+```
 
-on the 458 crack-containing validation images.
+Coordinates were written with six decimal places.
 
-#### No-Mosaic Ablation
+### Conversion considerations
 
-Removing Mosaic produced a noticeable performance decrease:
+Using external contours is simple and reproducible, but it can introduce limitations for:
 
-* Crack mIoU: **0.5677 → 0.5507**
-* Missed cracks: **18 → 34**
+* very thin cracks,
+* JPEG artifacts,
+* small isolated regions,
+* holes or nested structures,
+* fragmented annotations.
 
-For the investigated very-small-crack subset, **8/8** cracks were missed in the No-Mosaic experiment.
-
-This suggests that Mosaic augmentation was useful for the evaluated dataset, particularly for difficult small spatial patterns. The result is treated as experimental evidence rather than proof of a universal causal relationship.
-
-#### Crack-Focused Cropping
-
-Experiment 3 achieved:
-
-* Highest Crack mIoU: **0.5691**
-* Highest Mask mAP50-95: **0.1010**
-
-For the corresponding very-small-crack subset, IoU improved from:
-
-**0.0000 → 0.1759**
-
-and **4 of 8** samples were recovered.
-
-However, the number of false positives on background images increased:
-
-**0 → 3**
-
-This highlights an important trade-off between sensitivity to small cracks and background rejection.
+No minimum contour-area filter was applied.
 
 ---
 
-## 9. Evaluation Methodology
+# 7. Dataset Validation
 
-Standard segmentation metrics were complemented with custom pixel-level evaluation.
+The generated YOLO dataset was validated for:
 
-### Pixel-Level IoU
+* images without labels,
+* labels without matching images,
+* malformed label files,
+* invalid class IDs,
+* coordinates outside the expected range.
 
-Intersection over Union was calculated between the ground-truth binary mask and the combined predicted mask.
+The validation process helped ensure that the generated dataset was structurally compatible with YOLO segmentation training.
 
-### Dice Score
+However, the current validation does not fully detect all geometric edge cases, such as:
 
-Dice was used to measure overlap while providing a complementary perspective to IoU.
+* zero-area polygons,
+* collinear polygons,
+* certain invalid numerical values such as NaN.
 
-### Edge Cases
-
-The evaluation explicitly handles:
-
-* Ground truth empty + prediction empty → IoU = 1, Dice = 1
-* Ground truth non-empty + prediction empty → IoU = 0, Dice = 0
-* Ground truth and prediction both non-empty → standard overlap calculation
-
-Predicted segmentation instances are combined into a unified binary mask before pixel-level evaluation.
-
-The masks are rasterized at the original **448 × 448** resolution.
+A stronger geometry validation stage is planned for future iterations.
 
 ---
 
-## 10. Final Held-Out Test Evaluation
+# 8. Model Architecture
 
-The held-out test set contains:
+The project uses:
 
-**1,695 images**
+**YOLO11s-seg**
 
-The final evaluation identified:
+with pretrained weights.
 
-* **1,474 crack-containing images**
-* **221 background-only images**
+Main training configuration:
 
-The operating confidence threshold used for the final evaluation was:
+| Parameter     | Value                 |
+| ------------- | --------------------- |
+| Model         | YOLO11s-seg           |
+| Input size    | 448 × 448             |
+| Batch size    | 16                    |
+| Epochs        | 50                    |
+| Patience      | 15                    |
+| Optimizer     | AdamW (auto-selected) |
+| Learning rate | 0.002                 |
+| Momentum      | 0.9                   |
+| Workers       | 2                     |
+| Pretrained    | Yes                   |
 
-**0.07**
+All four experiments completed the full **50 epochs**.
 
-### Test Results
-
-| Test Outcome                | Number | Percentage |
-| :-------------------------- | :----: | :--------: |
-| **Total Test Images**       |  1,695 |   100.00%  |
-| **Crack-Containing Images** |  1,474 |   86.96%   |
-| ├─ Detected Cracks          |  1,302 |   88.33%   |
-| └─ Missed Cracks            |   172  |   11.67%   |
-| **Background-Only Images**  |   221  |   13.04%   |
-| ├─ Correctly Rejected       |   212  |   95.93%   |
-| └─ False Positives          |    9   |    4.07%   |
-
-### Final Test Interpretation
-
-On crack-containing images:
-
-* **1,302 / 1,474** were detected.
-* Image-level recall was **88.33%**.
-* **172 / 1,474** crack images were missed.
-
-On background-only images:
-
-* **212 / 221** were correctly rejected.
-* Background rejection was **95.93%**.
-* **9 / 221** produced false positives.
-
-The final reported crack segmentation metrics include:
-
-* **Crack mIoU: 0.5908**
-* **Crack Dice: 0.7275**
-
-These values summarize pixel-level segmentation quality and complement the image-level detection analysis above.
+The validation mAP was still increasing near the end of training, so the experiments should not be interpreted as fully converged.
 
 ---
 
-## 11. Error Analysis
+# 9. Experiment Design
 
-The missed test crack images were further analyzed by source domain.
+Four configurations were evaluated.
 
-| Source Domain     | Missed Images | Percentage of Misses |
-| :---------------- | :-----------: | :------------------: |
-| **Rissbilder**    |      136      |        79.07%        |
-| **GAPS384**       |       16      |         9.30%        |
-| **Other Sources** |       20      |        11.63%        |
-| **Total**         |    **172**    |      **100.00%**     |
+## Baseline
 
-### Main Finding
+The baseline used the standard training configuration with:
 
-The majority of missed cracks originated from **Rissbilder**.
-
-This indicates a potential **source-domain generalization gap**.
-
-The result is important because it changes the interpretation of model failure.
-
-Instead of simply concluding:
-
-> "The model is not accurate enough."
-
-the analysis suggests asking:
-
-> "What visual characteristics of this source domain are different from the data the model learned from?"
-
-Potential factors include:
-
-* Crack appearance
-* Image texture
-* Contrast
-* Surface material
-* Crack thickness
-* Acquisition conditions
-* Annotation characteristics
-
-This provides a more useful direction for future dataset expansion and targeted training.
+```text
+seed = 0
+```
 
 ---
 
-## 12. Engineering Decisions
+## Exp1
 
-### Preserve the Source Dataset
+Exp1 introduced a combined augmentation configuration:
 
-The original dataset was not destructively modified.
+| Parameter  | Baseline | Exp1 |
+| ---------- | -------- | ---- |
+| Mosaic     | 1.0      | 0.5  |
+| Scale      | 0.5      | 0.3  |
+| Degrees    | 0        | 5    |
+| FlipUD     | 0        | 0.1  |
+| Copy-paste | 0        | 0.15 |
+| Seed       | 0        | 42   |
 
-Instead, preparation scripts generate a separate YOLO-ready dataset.
+Exp1 should therefore be interpreted as a **combined augmentation configuration**, not as the isolated effect of one augmentation.
 
-### Global Image-Mask Lookup
+---
 
-Because the original split organization was inconsistent, image-mask pairing was performed globally rather than assuming that corresponding files must exist in the same original directory.
+## Exp2
 
-### Lock the Test Set First
+Exp2 was derived directly from Exp1 by removing Mosaic:
 
-The original test set was preserved before constructing the new train/validation split.
+```text
+Exp1 Mosaic: 0.5
+Exp2 Mosaic: 0
+```
 
-This reduces the risk of accidentally introducing test information into training.
+All other Exp1 settings were retained.
 
-### Conservative Background Selection
+Therefore, Exp2 provides an ablation of Mosaic relative to Exp1.
 
-Only clearly identified `noncrack` samples were used as confirmed background images.
+It is **not** a direct baseline-to-no-Mosaic comparison.
 
-Ambiguous empty masks were not automatically treated as confirmed negatives.
+---
+
+## Exp3
+
+Exp3 extended Exp1 with crack-focused training crops.
+
+The training dataset increased from:
+
+```text
+2,796 → 4,593 images
+```
+
+The approximate background proportion changed from:
+
+```text
+34.3% → 20.9%
+```
+
+The additional crops were:
+
+```text
+224 × 224
+```
+
+and were **upscaled 2× to 448 × 448 when the dataset was generated**.
+
+The generated crops were then **added to the original 2,796 training images**, rather than replacing them.
+
+The additional crops were generated from the training set only.
+
+Validation and test sets remained unchanged.
+
+---
+
+# 10. Validation Results
+
+For experiment comparison, confidence threshold **0.25** was used consistently.
+
+| Experiment | Crack IoU | Crack Dice | Missed | Miss Rate | FP | mAP50 | mAP50-95 |
+| ---------- | --------- | ---------- | ------ | --------- | -- | ----- | -------- |
+| Baseline   | 0.5588    | 0.6859     | 31     | 6.77%     | 0  | 0.319 | 0.0969   |
+| Exp1       | 0.5677    | 0.6992     | 18     | 3.93%     | 1  | 0.327 | 0.0986   |
+| Exp2       | 0.5507    | 0.6782     | 34     | 7.42%     | 0  | 0.310 | 0.0937   |
+| Exp3       | 0.5691    | 0.6976     | 23     | 5.02%     | 3  | 0.323 | 0.1010   |
+
+### Interpretation
+
+At the common comparison threshold of **confidence 0.25**, Exp1 was the validation configuration with the **lowest miss rate (3.93%)**, and it was selected for the threshold sweep and final held-out test evaluation.
+
+This selection should be understood as a **practical project decision**, rather than as a formally pre-registered selection rule in the notebook.
+
+Exp3 produced a slightly higher crack IoU than Exp1:
+
+```text
+0.5691 vs 0.5677
+```
+
+but also produced:
+
+```text
+Misses: 18 → 23
+False positives: 1 → 3
+mAP50: 0.327 → 0.323
+```
+
+Therefore, the small IoU improvement of **0.0014** did not translate into better detection behavior.
+
+Because all experiments used a single seed and were not fully converged, these small differences should not be treated as statistically conclusive.
+
+---
+
+# 11. Validation-Based Confidence Threshold Selection
+
+The final confidence threshold was selected by evaluating **Exp1 on the validation set**.
+
+The threshold sweep was performed before evaluating the held-out test set.
+
+| Confidence | Crack IoU  | Missed / 458 | FP / 239 |
+| ---------- | ---------- | ------------ | -------- |
+| 0.05       | 0.5901     | 2            | 8        |
+| **0.07**   | **0.5908** | **4**        | **7**    |
+| 0.10       | 0.5893     | 5            | 5        |
+| 0.15       | 0.5850     | 7            | 3        |
+| 0.20       | 0.5774     | 10           | 1        |
+| 0.25       | 0.5677     | 18           | 1        |
+| 0.30       | 0.5544     | 30           | 0        |
+| 0.40       | 0.5006     | 77           | 0        |
+
+The selected operating threshold was:
+
+```text
+confidence = 0.07
+```
+
+because **0.07 produced the highest mean per-image crack IoU in the validation sweep: 0.5908**.
+
+At this threshold:
+
+* Crack mean per-image IoU = **0.5908**
+* Crack Dice = **0.7275**
+* Misses = **4 / 458**
+* False positives = **7 / 239**
+
+The threshold of 0.05 produced fewer misses (**2 vs. 4**) but also produced more false positives (**8 vs. 7**) and a slightly lower crack IoU (**0.5901 vs. 0.5908**).
+
+The mean per-image crack IoU is also nearly flat between confidence values **0.05 and 0.10**:
+
+```text
+0.05 → 0.5901
+0.07 → 0.5908
+0.10 → 0.5893
+```
+
+The differences are only **0.0007** and **0.0015**, respectively. Therefore, 0.07 should be viewed as an operating point within a relatively flat region rather than as a sharp optimum.
+
+The test set was not used for threshold selection.
+
+---
+
+# 12. Final Test Evaluation
+
+The final configuration was:
+
+```text
+Experiment: Exp1
+Confidence threshold: 0.07
+```
+
+The notebook contains a **single test evaluation run** at this selected threshold.
+
+## Crack-only pixel-level metrics
+
+For the 1,474 crack images:
+
+| Metric                    | Result     |
+| ------------------------- | ---------- |
+| Mean per-image crack IoU  | **0.3719** |
+| Mean per-image crack Dice | **0.4907** |
+| Median IoU                | **0.3388** |
+| Median Dice               | **0.5061** |
+
+These are calculated per image using the predicted and ground-truth crack masks.
+
+A missed crack image contributes:
+
+```text
+IoU = 0
+Dice = 0
+```
+
+for the crack-only averages.
+
+---
+
+# 13. Overall Test Metrics
+
+When both crack and background images are included, and an empty prediction against an empty ground-truth mask is treated as a perfect match:
+
+| Metric            | Result     |
+| ----------------- | ---------- |
+| Overall mean IoU  | **0.4485** |
+| Overall mean Dice | **0.5518** |
+
+Because background images can contribute perfect empty-empty scores, these overall values should **not** be confused with crack-only segmentation performance.
+
+For this reason, the crack-only metrics are the primary metrics used to describe segmentation quality.
+
+---
+
+# 14. Image-Level Test Results
+
+The test set contains:
+
+```text
+1,474 crack images
+221 background images
+```
+
+For crack images:
+
+```text
+Detected: 1,302
+Missed: 172
+```
+
+Therefore:
+
+```text
+Detection rate = 1,302 / 1,474 = 88.33%
+```
+
+For background images:
+
+```text
+Correctly rejected: 212
+False positives: 9
+```
+
+Therefore:
+
+```text
+Background rejection = 212 / 221 = 95.93%
+```
+
+### Test background composition
+
+The 221 background images consist of:
+
+```text
+212 known noncrack_ images
+9 empty-label images from crack sources:
+6 Rissbilder
+3 Sylvie Chambon
+```
+
+The counts of 6 and 3 are **derived from total versus crack-image counts per source**.
+
+These 9 images may be part of the **43 ambiguous empty masks** identified during the earlier annotation investigation.
+
+The exact false-positive distribution across these background groups was not established, so no stronger claim is made.
+
+### Important definition
+
+In this analysis, a crack image is considered **detected** if the model produces any non-empty predicted crack mask.
+
+Therefore, detection rate does **not** imply good segmentation quality.
+
+A model can detect an image while producing a poorly aligned mask with very low IoU.
+
+---
+
+# 15. Source-Domain Error Analysis
+
+The test set contains crack images from multiple sources.
+
+| Source         | Crack Images | Missed  | Miss Rate  | Mean IoU   |
+| -------------- | ------------ | ------- | ---------- | ---------- |
+| Rissbilder     | 567          | 136     | 23.99%     | 0.2038     |
+| CRACK500       | 505          | 4       | 0.79%      | 0.6054     |
+| Volker         | 148          | 9       | 6.08%      | 0.2494     |
+| DeepCrack      | 78           | 2       | 2.56%      | 0.6000     |
+| GAPS384        | 76           | 16      | 21.05%     | 0.2641     |
+| CrackTree200   | 31           | 1       | 3.23%      | 0.0548     |
+| Sylvie Chambon | 25           | 4       | 16.00%     | 0.1002     |
+| CFD            | 18           | 0       | 0.00%      | 0.4639     |
+| forest         | 18           | 0       | 0.00%      | 0.5081     |
+| Eugen Muller   | 8            | 0       | 0.00%      | 0.1738     |
+| **Total**      | **1,474**    | **172** | **11.67%** | **0.3719** |
+
+### Main finding
+
+Rissbilder is the dominant source of failures:
+
+```text
+136 / 172 = 79.07%
+```
+
+of all missed crack images.
+
+Rissbilder represents only **38.5% of crack images in the test set (567 / 1,474)**, but accounts for **79.07% of the misses**.
+
+Rissbilder is **not represented in the training set**, but the absence of a source from training does not by itself explain the failure.
+
+For comparison, **DeepCrack is also unseen during training**, yet it achieved:
+
+```text
+Miss rate = 2.56%
+Mean IoU = 0.6000
+```
+
+This suggests that source-specific characteristics beyond simply being "unseen" contribute to generalization difficulty.
+
+---
+
+# 16. Why Detection Rate Alone Is Not Enough
+
+The source-level results demonstrate why image-level detection should be interpreted together with segmentation quality.
+
+For example:
+
+```text
+CrackTree200
+Detection miss rate: 3.23%
+Mean IoU: 0.0548
+```
+
+The model detects almost all CrackTree200 images, but the predicted segmentation masks overlap the ground truth very poorly.
+
+Therefore:
+
+> A detected crack image does not necessarily mean that the crack was segmented accurately.
+
+This is why the project reports both:
+
+* image-level detection behavior, and
+* pixel-level IoU/Dice.
+
+---
+
+# 17. Error Analysis
+
+The test errors are not uniformly distributed.
+
+## 17.1 Source/domain shift
+
+The strongest evidence is the high miss rate on Rissbilder and GAPS384 compared with CRACK500.
+
+This suggests differences in:
+
+* image appearance,
+* crack morphology,
+* acquisition conditions,
+* annotation style,
+* background texture,
+* source-specific visual characteristics.
+
+---
+
+## 17.2 Small or difficult cracks
+
+Many missed cracks are visually difficult.
+
+However, crack size alone should **not** be presented as the sole explanation for the failures.
+
+The current analysis found that:
+
+```text
+139 / 172
+```
+
+missed cracks fall into the medium-size range of approximately **1–5% of image area**.
+
+Only a small number of misses fall into the very-small category.
+
+Therefore, the evidence suggests that the errors cannot simply be described as "the model misses tiny cracks."
+
+Crack size is also confounded with dataset source, so a stronger analysis would examine size distributions separately for each source.
+
+---
+
+## 17.3 Fragmented annotations
+
+The test labels are considerably more fragmented than the validation labels.
+
+Approximate polygon/object counts:
+
+```text
+Validation:
+1,094 objects / 458 crack images ≈ 2.4 objects/image
+
+Test:
+32,088 objects / 1,474 crack images ≈ 21.8 objects/image
+```
+
+This difference can make the test segmentation problem substantially harder.
+
+It may also reflect differences in annotation style between datasets.
+
+---
+
+## 17.4 Mask-to-polygon conversion
+
+The conversion from raster masks to polygons can introduce additional error, especially for:
+
+* thin cracks,
+* fragmented cracks,
+* small disconnected regions,
+* JPEG artifacts.
+
+Because the conversion uses external contours without a minimum-area filter, small components are retained.
+
+---
+
+# 18. Key Findings
+
+The project produced several important findings.
+
+### Finding 1 — Dataset organization was a major issue
+
+The local train directory appeared to contain only 9 masks for 2,294 images.
+
+A global filename lookup showed:
+
+```text
+0 images without masks
+0 masks without images
+```
+
+This demonstrates why dataset auditing should happen before model training.
+
+---
+
+### Finding 2 — Most empty masks were intentional background
+
+```text
+1,454 empty masks
+1,411 noncrack
+97.04%
+```
+
+Only 43 remained ambiguous.
+
+---
+
+### Finding 3 — Validation performance may overestimate generalization
+
+Exp1 achieved:
+
+```text
+Validation crack IoU @ 0.07 = 0.5908
+```
+
+while the held-out test achieved:
+
+```text
+Test crack IoU @ 0.07 = 0.3719
+```
+
+The difference is consistent with the much greater source diversity and domain shift in the test set.
+
+Validation may also be somewhat optimistic because the current leakage check is filename-based and may not detect related tiles originating from the same parent image, particularly in CRACK500.
+
+---
+
+### Finding 4 — Rissbilder dominates the missed detections
+
+```text
+136 / 172 missed crack images
+= 79.07%
+```
+
+come from Rissbilder.
+
+Rissbilder is not represented in the training data, but unseen-source status alone does not explain the result: DeepCrack is also unseen during training and achieved a **2.56% miss rate and 0.6000 mean IoU**.
+
+This indicates that source-specific visual and annotation characteristics likely play an important role.
+
+---
+
+### Finding 5 — More training crops did not clearly improve robustness
+
+Exp3 increased the training set:
+
+```text
+2,796 → 4,593
+```
+
+but compared with Exp1:
+
+```text
+IoU:      0.5677 → 0.5691
+Misses:   18 → 23
+FP:        1 → 3
+mAP50:    0.327 → 0.323
+```
+
+The IoU improvement was only **0.0014**, while image-level detection became worse.
+
+The background share also changed from **34.3% to 20.9%**, which may explain part of the increase in false positives. Therefore, the result cannot be attributed to the added crops alone.
+
+---
+
+# 19. Limitations
+
+This project has several important limitations.
+
+### Dataset limitations
+
+* 6,110 original images are not currently included in the working dataset.
+* Training and validation positives are dominated by CRACK500 and CFD.
+* Several sources appear only in the test set.
+* Test annotations are considerably more fragmented.
+* Some empty masks remain ambiguous.
+
+### Experimental limitations
+
+* Each configuration was trained with a single seed.
+* Baseline uses seed 0, while Exp1–Exp3 use seed 42.
+* Exp1 changes several augmentation parameters simultaneously.
+* Experiments completed 50 epochs but were still improving near the end.
+* Therefore, small metric differences should not be interpreted as statistically significant.
+* Experiments were compared at **confidence 0.25**, while the threshold sweep was performed only for Exp1. Therefore, Exp1 was not compared against the other experiments at each experiment's individually optimized threshold.
+
+### Leakage-analysis limitations
+
+The current leakage check is filename-based.
+
+It does not detect:
+
+* duplicate pixels,
+* perceptual duplicates,
+* sibling tiles,
+* shared parent images.
+
+### Evaluation limitations
+
+* The confidence threshold is data-dependent.
+* The threshold sweep was performed on the validation set only.
+* The test set was evaluated at one selected operating threshold.
+* mAP was not computed for the final test run.
+* Detection is defined by any non-empty prediction and therefore does not measure segmentation quality by itself.
+* Source-level differences may reflect both domain shift and annotation-style differences.
+
+### Annotation-processing consistency
+
+Different helper scripts currently use slightly different foreground definitions:
+
+* `>127` in `prepare_yolo_dataset.py`
+* `≥127` in `visualize_samples.py`
+* `≥128` in `dataset_statistics.py`
+* `max() == 0` for empty-mask detection in `mask_analysis.py`
+
+The practical effect appears small, but standardizing these definitions would improve consistency and reproducibility.
+
+### Engineering/reproducibility limitations
+
+The current repository does not yet include all of the following:
+
+* the complete training notebook,
+* a pinned `requirements.txt`,
+* trained model weights,
+* experiment result CSVs,
+* formal dataset source/license documentation,
+* a single CLI/configuration file for reproducing every experiment.
+
+The training environment used for the experiments was:
+
+```text
+Python 3.13.15
+Ultralytics 8.4.155
+Google Colab
+NVIDIA T4
+```
+
+Training paths also contain environment-specific configuration.
+
+---
+
+# 20. Future Work
+
+Future improvements should focus on both model performance and experimental rigor.
+
+### Dataset
+
+* Recover and investigate the remaining 6,110 original images.
+* Inspect the 43 ambiguous empty masks.
+* Perform source-aware dataset analysis.
+* Review annotation quality across sources.
+* Investigate test-label fragmentation.
+
+### Leakage and splitting
+
+* Add perceptual duplicate detection.
+* Group related tiles by parent image.
+* Use source-aware or group-aware splitting where appropriate.
+
+### Modeling
+
+* Evaluate larger YOLO segmentation models.
+* Test stronger augmentation strategies.
+* Explore crack-specific preprocessing.
+* Evaluate alternative segmentation architectures.
+* Investigate source-aware training.
+
+### Evaluation
+
+* Perform threshold calibration.
+* Report per-source performance systematically.
+* Analyze IoU by crack size.
+* Analyze performance by image appearance and source.
+* Add precision/recall curves.
+* Evaluate the final configuration on additional external datasets.
 
 ### Reproducibility
 
-The preparation and validation process uses deterministic settings where appropriate, including:
-
-* Random seed 42
-* Explicit validation ratio
-* Programmatic dataset construction
-* Automated annotation validation
-* Leakage checks
+* Add `requirements.txt`.
+* Add a clean training configuration.
+* Export experiment results to CSV.
+* Save model weights and metadata.
+* Document dataset sources and licenses.
+* Include the final training/evaluation notebook.
 
 ---
 
-## 13. Repository Structure
+# 21. Project Structure
 
 ```text
 intelligent-infrastructure-inspection/
@@ -470,174 +964,60 @@ intelligent-infrastructure-inspection/
 │   ├── dataset_audit.py
 │   ├── dataset_statistics.py
 │   ├── mask_analysis.py
-│   └── visualize_samples.py
+│   ├── visualize_samples.py
+│   └── ...
 │
 ├── scripts/
 │   ├── prepare_yolo_dataset.py
 │   ├── validate_yolo_dataset.py
-│   └── check_leakage.py
+│   ├── check_leakage.py
+│   └── ...
 │
 ├── docs/
 │   └── project_report.md
 │
-├── .gitignore
-└── README.md
+├── README.md
+└── ...
 ```
 
-### Main Files
-
-| File                               | Purpose                                     |
-| :--------------------------------- | :------------------------------------------ |
-| `src/dataset_audit.py`             | Dataset integrity and structure audit       |
-| `src/mask_analysis.py`             | Empty-mask and pixel-value analysis         |
-| `src/dataset_statistics.py`        | Dataset statistics and crack-area analysis  |
-| `src/visualize_samples.py`         | Image, mask, and overlay visualization      |
-| `scripts/prepare_yolo_dataset.py`  | Reproducible YOLO dataset construction      |
-| `scripts/validate_yolo_dataset.py` | YOLO annotation validation                  |
-| `scripts/check_leakage.py`         | Train/validation/test leakage check         |
-| `docs/project_report.md`           | Full technical investigation and case study |
+If the training/evaluation notebook is added to the repository, it should also be listed here using its actual repository path and filename.
 
 ---
 
-## 14. Reproducibility
+# 22. Technical Takeaway
 
-The repository focuses on reproducible dataset engineering rather than storing generated datasets and model weights directly in Git.
+The main lesson from this project was that **model training was only one part of the problem**.
 
-The `.gitignore` excludes:
+The most important work involved:
 
-* Virtual environments
-* Python cache files
-* Model weights
-* Local YOLO dataset archives
-* Local experiment outputs
-
-The main dataset preparation process can be reproduced through:
-
-```bash
-python scripts/prepare_yolo_dataset.py
+```text
+Audit the data
+      ↓
+Understand the annotations
+      ↓
+Build a controlled dataset
+      ↓
+Validate the conversion
+      ↓
+Compare experiments
+      ↓
+Select threshold on validation
+      ↓
+Evaluate the final configuration on the held-out test set
+      ↓
+Analyze failures by source
 ```
 
-Dataset annotations can then be validated with:
+The final configuration achieved:
 
-```bash
-python scripts/validate_yolo_dataset.py
+```text
+Validation crack IoU @ conf 0.07: 0.5908
+Test crack IoU @ conf 0.07:       0.3719
+Test crack Dice:                  0.4907
+Test crack detection rate:        88.33%
+Background rejection:             95.93%
 ```
 
-Potential train/validation/test overlap can be checked with:
+The largest generalization challenge was not simply detecting cracks, but maintaining reliable segmentation across **different datasets, annotation styles, and visual domains**.
 
-```bash
-python scripts/check_leakage.py
-```
-
----
-
-## 15. Limitations
-
-Several limitations remain.
-
-### Small-Crack Sensitivity
-
-Very small and thin cracks remain difficult to segment reliably.
-
-### Domain Generalization
-
-The test error analysis shows that missed detections are strongly concentrated in the Rissbilder source domain.
-
-### Dataset Composition
-
-The working dataset is derived from a specific collection of crack datasets and therefore may not represent every real-world infrastructure surface.
-
-### Computational Constraints
-
-Training was performed using cloud GPU resources rather than dedicated local GPU hardware.
-
-### Threshold Dependence
-
-Detection outcomes depend on the confidence threshold. The selected operating threshold should therefore be considered an engineering operating point rather than a universal optimum.
-
----
-
-## 16. Future Work
-
-Potential next steps include:
-
-### Dataset Expansion
-
-Add more examples from underrepresented source domains, particularly domains contributing a large proportion of missed detections.
-
-### Small-Crack Focus
-
-Investigate:
-
-* Higher-resolution training
-* Multi-scale training
-* More targeted cropping
-* Small-object augmentation
-* Alternative segmentation architectures
-
-### Domain Generalization
-
-Evaluate domain-aware training strategies and cross-source validation to determine whether the model generalizes beyond the dominant training domains.
-
-### Threshold Calibration
-
-Perform a systematic confidence-threshold analysis to select an operating point based on the intended inspection scenario.
-
-### Deployment Optimization
-
-Investigate:
-
-* Inference latency
-* Model size
-* Memory usage
-* Edge deployment
-* Batch vs. single-image inference
-
-### Inspection System Integration
-
-A future production system could combine crack segmentation with:
-
-* Crack severity estimation
-* Crack length and width measurement
-* Defect tracking across inspections
-* Inspection history
-* Automated reporting
-* Infrastructure asset monitoring
-
----
-
-## 17. Technical Report
-
-The complete investigation, including dataset auditing, annotation analysis, dataset construction, experiment details, evaluation methodology, error analysis, and engineering decisions is available in:
-
-**[Read the Full Technical Project Report](docs/project_report.md)**
-
-The report serves as the detailed technical case study behind this repository, while this README provides the high-level engineering overview.
-
----
-
-## 18. Final Takeaway
-
-This project was not treated as a simple:
-
-**"Train YOLO and report accuracy"**
-
-exercise.
-
-The main focus was building a complete computer vision workflow in which every stage could be investigated and justified:
-
-**Audit → Understand → Prepare → Validate → Train → Measure → Analyze → Improve**
-
-The most important outcome is therefore not a single metric.
-
-It is the ability to trace model performance back to:
-
-* Dataset structure
-* Annotation quality
-* Background composition
-* Experiment design
-* Evaluation methodology
-* Small-crack behavior
-* Source-domain differences
-
-This makes the project a practical case study in **computer vision engineering, dataset quality analysis, segmentation, reproducible experimentation, and model error analysis**.
+That finding is the main engineering takeaway of the project.

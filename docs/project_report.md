@@ -1,1432 +1,1317 @@
-# Technical Project Report: Intelligent Infrastructure Inspection System
+Intelligent Infrastructure Inspection System
+Technical Project Report
 
-## 1. Dataset Investigation & Audit
+Task: Crack Segmentation and Infrastructure Inspection
+Model: YOLO11s-seg
+Framework: Ultralytics
+Environment: Google Colab / NVIDIA T4
+Dataset: Combined crack-image dataset from multiple public sources
 
-### 1.1 Project Objective
+1. Dataset Investigation & Audit
+1.1 Project Objective
 
-The objective of this project is to develop an automated infrastructure inspection system capable of identifying and segmenting surface cracks from images.
+The objective of this project was to develop and evaluate a crack-segmentation system for infrastructure inspection using YOLO instance segmentation.
 
-The project focuses on **semantic/instance-style crack segmentation using YOLO segmentation**, with the broader engineering goal of supporting automated infrastructure inspection rather than treating the task as a simple image-classification problem.
+The project focused not only on model training, but also on understanding the dataset, investigating annotation quality, constructing a controlled working dataset, comparing model configurations, selecting a confidence threshold using validation data, and performing a held-out test evaluation.
 
-The workflow was designed around the following principle:
+The model was trained using instance segmentation, while the custom evaluation also reduced all predicted instances to a single merged binary crack mask for image-level and pixel-level evaluation.
 
-> **Audit the data first, understand the annotations, construct a reproducible training dataset, establish a baseline, investigate failure modes, and then improve the system based on evidence.**
+The overall workflow was:
 
-The complete workflow was:
+Raw Dataset → Dataset Audit → Mask/Annotation Investigation → Dataset Construction → YOLO Segmentation Conversion → Dataset Validation → Baseline Training → Configuration Comparisons → Validation-Based Model Selection → Confidence Threshold Selection → Held-Out Test Evaluation → Source-Level Error Analysis → Engineering Conclusions
 
-```text
-Raw Dataset
-    ↓
-Dataset Audit
-    ↓
-Mask / Annotation Investigation
-    ↓
-Dataset Construction
-    ↓
-YOLO Segmentation Conversion
-    ↓
-Dataset Validation
-    ↓
-Baseline Training
-    ↓
-Controlled Experiments
-    ↓
-Custom Evaluation
-    ↓
-Error Analysis
-    ↓
-Final Test Evaluation
-    ↓
-Engineering Conclusions
-```
+The main engineering questions were:
 
----
-
-### 1.2 Dataset Composition
+How reliable and internally consistent is the original dataset?
+How should raster masks be converted into YOLO segmentation labels?
+How should positive and background images be selected?
+How does the model behave across different source datasets?
+Do targeted configuration changes improve validation performance?
+How large is the gap between validation and held-out test performance?
+Which sources and crack characteristics contribute most to failures?
+Is the resulting model suitable as a reliable infrastructure-inspection component?
+1.2 Dataset Composition
 
 The original dataset contained:
 
-* **11,298 images**
-* **11,298 corresponding masks**
-* Image format: `.jpg`
-* Mask format: `.jpg`
-* Resolution: **448 × 448 pixels**
+11,298 images
+11,298 raster masks
+Image format: JPG
+Image size: 448 × 448 pixels
 
-The dataset therefore contained a globally complete image-mask collection.
+The dataset was inspected globally rather than relying only on the initially provided training directory.
 
-However, the directory organization required investigation before training.
+The initial local directory structure showed a major anomaly: the training image directory contained 2,294 images, while the corresponding training mask directory contained only 9 mask files.
 
----
+This did not immediately imply that the dataset was corrupted or unusable. Instead, it motivated a global filename-based lookup across the available dataset.
 
-### 1.3 Initial Directory-Level Anomaly
+1.3 Initial Directory-Level Anomaly
 
-During the initial audit, the training directory showed an unexpected structure:
+The initial training directory contained:
 
-* `train/images`: **2,294 images**
-* `train/masks`: only **9 masks**
+2,294 images
+9 masks
 
-At first glance, this appeared to indicate a severe image-mask mismatch.
+A direct local-directory comparison therefore suggested a severe image-mask mismatch.
 
-However, a global audit showed:
+However, the dataset was subsequently searched globally using filename stems rather than assuming that masks had to exist in the same directory.
 
-* Images without a corresponding mask: **0**
-* Masks without a corresponding image: **0**
+The global lookup found matching image-mask pairs for the evaluated files, avoiding an unnecessary assumption that the original directory structure represented the complete annotation organization.
 
-This distinction was important.
+This was an important preprocessing decision because blindly treating the local directory as the complete dataset would have discarded potentially valid annotated images.
 
-The problem was therefore not missing annotations at the dataset level. Instead, the problem was an **inconsistent split-level directory organization**.
+1.4 Dataset Integrity Checks
 
-This led to an important engineering decision:
+The audit included:
 
-> The source dataset should not be modified destructively or discarded based solely on the local train/mask directory structure.
+image-to-mask filename matching
+image dimension checks
+file opening/read checks
+missing image-mask pair detection
+mask inspection
+train/test consistency checks
 
-Instead, the preparation pipeline was designed around a **global image-to-mask lookup**, allowing every image to be matched with its corresponding mask regardless of the original directory placement.
+For the audited files:
 
-This preserved the original dataset while producing a clean training structure separately.
+2,294 / 2,294 image dimensions were checked successfully.
+No files failed the audit's read/open checks.
+No missing image-mask pairs were found in the global filename lookup for the evaluated data.
 
----
+The phrase "unreadable files: 0" should therefore be interpreted as no files failed the audit's read/open checks, rather than as a complete guarantee of pixel-level file integrity under every possible decoder condition.
 
-### 1.4 Dataset Integrity Checks
+1.5 Leakage Investigation
 
-Several integrity checks were performed before training.
+A filename-stem overlap check was performed across the evaluated dataset splits.
 
-#### Image-Mask Matching
+No direct filename overlap was found between the evaluated train, validation, and test sets.
 
-The global audit found:
+However, this check has an important limitation: it is a filename-based check.
 
-```text
-Images without masks: 0
-Masks without images: 0
-```
+It does not detect:
 
-Therefore, the complete global dataset had a one-to-one image-mask correspondence.
+duplicate image content under different filenames
+near-duplicate images
+sibling tiles generated from the same parent image
+related crops
+visually similar images
+parent-image relationships
 
-#### Image Readability
+This is particularly relevant for sources such as CRACK500, where related image tiles may exist.
 
-The dataset was checked for unreadable or corrupted image files.
+Therefore, the leakage check provides useful evidence against direct filename duplication, but it does not prove complete independence between all samples.
 
-Result:
+2. Mask Analysis & Annotation Investigation
+2.1 Why Mask Analysis Was Necessary
 
-```text
-Unreadable files: 0
-```
+Before converting the dataset to YOLO segmentation format, the raster masks were investigated to understand:
 
-#### Image Dimensions
+foreground/background distribution
+empty masks
+source characteristics
+connected crack regions
+possible annotation inconsistencies
+the effect of the chosen foreground threshold
 
-The expected image resolution was:
+This step was necessary because segmentation performance is strongly affected by the quality and structure of the target masks.
 
-```text
-448 × 448
-```
+2.2 Empty Mask Investigation
 
-The dimension audit found:
+A total of 1,454 masks were found to contain no foreground pixels under the project's empty-mask check.
 
-```text
-Dimension mismatches: 0
-```
+Among these:
 
-#### Test Split
+1,411 were associated with filenames containing noncrack
+This represents 97.04% of the empty masks.
+The remaining 43 masks were ambiguous and were not automatically classified as background.
 
-The original test split contained:
+This distinction is important because an empty mask does not necessarily mean that the image is intentionally a negative sample. Some may represent annotation or dataset-processing cases requiring further investigation.
 
-```text
-1,695 images
-1,695 masks
-```
+2.3 Mask Pixel Analysis
 
-The test set was treated as a fixed evaluation set and was not used for training or validation.
+The main mask-processing pipeline used a foreground threshold of:
 
----
+pixel value > 127
 
-### 1.5 Leakage Investigation
+Pixels above this threshold were treated as crack foreground.
 
-A separate leakage check was performed on the generated YOLO dataset.
+The analysis also investigated connected components and contours because a single crack image may contain multiple disconnected regions.
 
-The purpose was to ensure that the same image identity did not appear across multiple splits.
+The mask structure was particularly important for understanding the later difference between validation and test performance, where the number of polygon objects per image differed substantially.
 
-The final dataset construction and leakage validation confirmed that train, validation, and test images were separated without stem overlap.
+2.4 Visualization
 
----
+Representative images and masks were visually inspected to verify that:
 
-## 2. Mask Analysis & Annotation Investigation
+cracks were present where expected
+background images were generally empty
+masks corresponded to visible crack regions
+the mask-to-polygon conversion did not obviously invert foreground/background semantics
 
-### 2.1 Why Mask Analysis Was Necessary
+Visualization was treated as a qualitative validation step rather than as a substitute for quantitative evaluation.
 
-Before converting the masks to YOLO segmentation labels, the annotation structure needed to be understood.
+3. Dataset Preparation Strategy
+3.1 Why a Working Dataset Was Constructed
 
-A segmentation mask is not simply a binary label saying whether an image contains a crack.
+The original dataset contained 11,298 images, but the project did not use all of them in the final training/validation/test pipeline.
 
-Instead, it defines the pixels belonging to the crack region.
+A smaller working dataset was constructed to allow:
 
-Therefore, several questions had to be answered:
+controlled experimentation
+manageable training time
+explicit source distribution
+a fixed held-out test set
+reproducible comparison between configurations
 
-1. Are masks actually binary?
-2. How many images contain no crack?
-3. Are empty masks concentrated in a specific subset?
-4. Can background-only images be identified reliably?
-5. What threshold should be used when converting masks into binary regions?
+The resulting working dataset contained 5,188 images.
 
----
+This means that 6,110 images from the original dataset were not used in the current working dataset.
 
-### 2.2 Empty Mask Investigation
+3.2 Split Strategy
 
-The mask analysis identified:
+The working dataset was divided as follows:
 
-**1,454 empty masks** in total.
+Split	Crack	Background	Total
+Train	1,836	960	2,796
+Validation	458	239	697
+Test	1,474	221	1,695
+Total	3,768	1,420	5,188
 
-An empty mask means that no crack pixels were present according to the mask representation.
+The test set was locked before final model evaluation and was not used for model or threshold selection.
 
-A filename-based investigation showed that:
+3.3 Positive and Background Sampling
 
-* **1,411 / 1,454 empty masks**
-* approximately **97.04%**
+The training and validation positive images were primarily drawn from:
 
-were associated with filenames containing the `noncrack` designation.
+CRACK500
+CFD
 
-This provided strong evidence that the dataset intentionally contained background/non-crack examples.
+The test set introduced substantially more source diversity, including datasets that were not represented in training.
 
-However, **43 empty masks** did not follow that filename pattern.
+This created a useful held-out evaluation scenario for investigating cross-source generalization.
 
-This was important because it showed that filename-based filtering alone was insufficient.
+The test set contained:
 
-Therefore, the preparation pipeline used both:
+1,474 crack images
+221 background images
+3.4 Background Distribution
 
-* filename information where available, and
-* actual mask content.
+Background images were explicitly included in the evaluation to measure false-positive behavior.
 
-The `noncrack` designation was treated as a strong signal rather than blindly assuming that every image without the string was positive.
+The test background set contained 221 images.
 
----
+Of these:
 
-### 2.3 Mask Pixel Analysis
+212 were known noncrack_ images.
+9 were empty-label images originating from crack sources.
 
-The mask analysis script examined:
+The 9 crack-source empty-label images were inferred from the difference between total test images and crack-image counts per source:
 
-* maximum pixel value
-* unique pixel values
-* most frequent pixel values
-* threshold-based foreground detection
+6 Rissbilder
+3 Sylvie Chambon
 
-Several candidate thresholds were inspected, including:
+The exact false-positive distribution between these two groups is not known.
 
-```text
-1
-10
-50
-100
-127
-128
-200
-240
-```
+3.5 Source Distribution
 
-The main threshold selected for the segmentation conversion pipeline was:
+The validation set is drawn from the same two sources as the training set.
 
-```text
-MASK_THRESHOLD = 127
-```
+The training/validation positive distribution was therefore substantially different from the test distribution.
 
-Pixels above the threshold were treated as foreground crack pixels.
+The test set contained the following crack-source distribution:
 
-This threshold was then used consistently in the main mask-to-YOLO conversion workflow and visualization pipeline.
+Source	Crack Images
+Rissbilder	567
+CRACK500	505
+Volker	148
+DeepCrack	78
+GAPS384	76
+CrackTree200	31
+Sylvie Chambon	25
+CFD	18
+forest	18
+Eugen Muller	8
+Total	1,474
 
----
+This difference in source composition is central to interpreting the validation-to-test performance gap.
 
-### 2.4 Visualization
+4. YOLO Segmentation Conversion & Validation
+4.1 Mask-to-YOLO Conversion
 
-Random samples were visualized using:
+The raster masks were converted into YOLO segmentation labels.
 
-1. Original image
-2. Ground-truth mask
-3. Overlay between image and mask
+The main conversion pipeline:
 
-The visualization process was used to verify that the masks represented actual crack regions and to inspect the relationship between image appearance and annotation boundaries.
+loaded the raster mask
+applied a foreground threshold of >127
+extracted external contours
+converted contour coordinates to normalized YOLO coordinates
+assigned class ID 0 for crack
+stored coordinates with six decimal places
 
-A fixed random seed of:
+No minimum contour-area threshold was applied during the main conversion.
 
-```text
-42
-```
+This preserves small connected regions but also means that small artifacts or fragmented regions may become individual polygons.
 
-was used for reproducibility.
+Potential consequences include:
 
----
+fragmented crack labels
+very small polygons
+sensitivity to JPEG artifacts
+thin-crack fragmentation
+differences caused by holes or nested structures
+4.2 Background Images
 
-## 3. Dataset Preparation Strategy
+Images identified as background were represented by empty YOLO label files.
 
-### 3.1 Why a New YOLO Dataset Was Created
+This allowed the model to be evaluated not only on crack detection but also on its ability to reject images without cracks.
 
-The original dataset structure was not directly suitable for YOLO segmentation training.
+The background set was intentionally retained because false positives are operationally important in an infrastructure-inspection system.
 
-Therefore, a separate prepared dataset was generated:
+4.3 YOLO Dataset Validation
 
-```text
-data/yolo_crack/
-```
+A dataset validation process was used to check:
 
-The original source dataset remained unchanged.
+images without labels
+labels without matching images
+malformed label files
+invalid class IDs
+coordinates outside the expected normalized range
 
-This separation provided two benefits:
+The validator provided useful structural checks, but it should not be interpreted as a complete geometric validator.
 
-* preservation of the original data
-* reproducibility of the training dataset construction process
+For example, it does not fully guarantee detection of:
 
-The preparation process was implemented in:
+zero-area polygons
+collinear polygon points
+every possible NaN-related edge case
+all forms of geometrically degenerate annotations
+4.4 Leakage Validation
 
-```text
-scripts/prepare_yolo_dataset.py
-```
+The constructed YOLO dataset was checked again for filename-based overlap.
 
----
+No direct filename-stem overlap was found between the evaluated splits.
 
-### 3.2 Split Strategy
+However, as discussed earlier, this does not detect visual duplicates, related tiles, or parent-image relationships.
 
-The preparation pipeline used:
+A stronger future leakage analysis should use perceptual hashing and source/parent grouping.
 
-```text
-Validation ratio = 20%
-Random seed = 42
-Class ID = 0
-Class name = crack
-Mask threshold = 127
-```
+5. Training Strategy
+5.1 Compute Strategy
 
-The test set was **locked first**.
+Training was performed in:
 
-This was an important decision because the test set represents the final generalization benchmark and should not be indirectly altered while constructing the training/validation data.
+Google Colab
+NVIDIA T4 GPU
+Python 3.13.15
+Ultralytics 8.4.155
 
-After locking the test set, the remaining data was used to construct the training and validation subsets.
+The local hardware did not provide a dedicated NVIDIA GPU, so cloud GPU training was used.
 
----
-
-### 3.3 Positive and Background Sampling
-
-The pipeline separately considered:
-
-* crack-containing images
-* confirmed background/non-crack images
-
-The goal was to ensure that the training and validation sets contained meaningful background examples rather than allowing the distribution to be determined accidentally by the original directory structure.
-
-After excluding test images, **1,199 confirmed non-crack candidates** were available for the train/validation construction process.
-
-The final training and validation composition was:
-
-| Split          | Positive Images | Background Images | Total Images |
-| :------------- | --------------: | ----------------: | -----------: |
-| **Train**      |           1,836 |               960 |        2,796 |
-| **Validation** |             458 |               239 |          697 |
-| **Test**       |           1,474 |               221 |        1,695 |
-| **Total**      |       **3,768** |         **1,420** |    **5,188** |
-
-The test composition shown above reflects the later final-test analysis.
-
----
-
-### 3.4 Background Distribution
-
-The final training set contained:
-
-```text
-960 / 2,796 = 34.33% background images
-```
-
-The validation set contained:
-
-```text
-239 / 697 = 34.29% background images
-```
-
-The difference between the two proportions was only:
-
-```text
-0.04 percentage points
-```
-
-This indicates that the background-image proportions were highly consistent between training and validation.
-
-The result is important because the validation set therefore contained a background distribution similar to the training data, reducing the risk that performance differences were caused simply by a major shift in background prevalence.
-
----
-
-## 4. YOLO Segmentation Conversion & Validation
-
-### 4.1 Mask-to-YOLO Conversion
-
-YOLO segmentation does not directly consume raster masks.
-
-The binary masks therefore had to be converted into polygon-based segmentation labels.
-
-The conversion process was:
-
-```text
-Raster Mask
-    ↓
-Binary Crack Region
-    ↓
-Connected / Contour Extraction
-    ↓
-Polygon Coordinates
-    ↓
-YOLO Segmentation Label
-```
-
-The crack class was assigned:
-
-```text
-Class ID = 0
-Class name = crack
-```
-
----
-
-### 4.2 Background Images
-
-Background-only images do not contain crack polygons.
-
-Therefore, they were intentionally allowed to have empty YOLO label files.
-
-This was handled explicitly by the validation script rather than treating empty labels as an automatic dataset error.
-
----
-
-### 4.3 YOLO Dataset Validation
-
-The generated dataset was validated using:
-
-```text
-scripts/validate_yolo_dataset.py
-```
-
-The validation checked:
-
-* missing labels
-* extra labels
-* malformed annotation lines
-* invalid class IDs
-* coordinates outside `[0, 1]`
-* malformed polygon coordinates
-* invalid label structures
-* empty labels
-
-Empty labels were allowed when they corresponded to legitimate background images.
-
----
-
-### 4.4 Leakage Validation
-
-The generated dataset was also checked using:
-
-```text
-scripts/check_leakage.py
-```
-
-The purpose was to ensure that image identities did not overlap between:
-
-```text
-Train
-Validation
-Test
-```
-
-No train/validation/test stem overlap was detected.
-
----
-
-## 5. Training Strategy
-
-### 5.1 Compute Strategy
-
-The local development machine was not equipped with a dedicated NVIDIA GPU.
-
-The local machine specifications were:
-
-* Intel Core i7-10510U
-* 8 GB RAM
-* Intel UHD integrated graphics
-* No NVIDIA GPU
-
-Rather than treating this as a blocker, the project separated lightweight engineering tasks from GPU-intensive training.
-
-### Local machine
-
-Used for:
-
-* dataset auditing
-* mask analysis
-* visualization
-* dataset preparation
-* YOLO conversion
-* validation
-* leakage checking
-* project organization
-
-### Google Colab
-
-Used for:
-
-* model training
-* GPU-accelerated inference
-* experiment execution
-
-The training environment used a **Tesla T4 GPU**.
-
-This was an engineering compute decision designed to make experimentation practical without requiring dedicated local GPU hardware.
-
----
-
-### 5.2 Model Selection
+5.2 Model Selection
 
 The selected architecture was:
 
-**YOLO11s-seg**
+YOLO11s-seg
 
-A pretrained YOLO segmentation model was used as the starting point.
+The model was initialized from pretrained weights.
 
-Transfer learning was chosen because the project goal was to adapt an established segmentation architecture to infrastructure crack segmentation rather than train a segmentation model entirely from scratch.
+The model was chosen as a practical balance between segmentation capability and computational cost.
 
----
-
-### 5.3 Training Configuration
+5.3 Training Configuration
 
 The main training configuration was:
 
-| Parameter        | Value       |
-| :--------------- | :---------- |
-| Model            | YOLO11s-seg |
-| Input Resolution | 448 × 448   |
-| Batch Size       | 16          |
-| Epochs           | 50          |
-| Patience         | 15          |
-| Optimizer        | AdamW       |
-| Learning Rate    | 0.002       |
-| Momentum         | 0.9         |
-| Workers          | 2           |
-| Random Seed      | 42          |
+Parameter	Value
+Model	YOLO11s-seg
+Image size	448 × 448
+Batch size	16
+Epochs	50
+Patience	15
+Optimizer	AdamW (auto-selected)
+Learning rate	0.002
+Momentum	0.9
+Workers	2
+Baseline random seed	0
+Exp1–Exp3 random seed	42
 
-The same general training framework was used across the experiments so that changes in results could be interpreted in relation to the experimental modification.
+All four experiments completed the planned 50 epochs.
 
----
+The training curves indicated that mAP was still increasing near the end of training, suggesting that the models were not fully converged within the 50-epoch budget.
 
-## 5.4 Experimental Design
+5.4 Experiment Configurations
 
-The project did not stop after obtaining a baseline.
+Four configurations were evaluated.
 
-Instead, controlled experiments were used to investigate specific hypotheses about crack segmentation.
+Baseline
 
-The four actual training runs were:
+The baseline used the original training configuration with:
 
-1. **Baseline**
-2. **Experiment 1 — Small-Crack Focused Augmentation**
-3. **Experiment 2 — No-Mosaic Ablation**
-4. **Experiment 3 — Crack-Focused Cropping**
+seed = 0
+Mosaic = 1.0
+Scale = 0.5
+Degrees = 0
+FlipUD = 0
+Copy-paste = 0
+Experiment 1 — Combined Augmentation Configuration
 
-The baseline was not counted as an experiment number.
+Experiment 1 modified several augmentation and training settings together:
 
----
+Mosaic: 1.0 → 0.5
+Scale: 0.5 → 0.3
+Degrees: 0 → 5
+FlipUD: 0 → 0.1
+Copy-paste: 0 → 0.15
+Seed: 0 → 42
 
-## 5.5 Unified Experiment Comparison
+Because several variables changed simultaneously, Exp1 should be interpreted as a combined augmentation configuration, not as evidence that any single augmentation component caused the observed difference.
 
-All four runs were evaluated on the same validation set:
+Experiment 2
 
-```text
-697 validation images
-458 crack-containing images
-239 background images
-```
+Exp2 was derived from Exp1 by changing:
 
-The verified comparison was:
+Mosaic: 0.5 → 0
 
-| Model / Experiment       | Crack Mean IoU | Crack Mean Dice | Missed Cracks (out of 458) | Miss Rate (%) | False Positives (out of 239) | Mask mAP50 | Mask mAP50-95 |
-| :----------------------- | -------------: | --------------: | -------------------------: | ------------: | ---------------------------: | ---------: | ------------: |
-| **Baseline**             |         0.5588 |          0.6859 |                         31 |         6.77% |                            0 |      0.319 |        0.0969 |
-| **Exp 1 — Augmentation** |     **0.5677** |      **0.6992** |                         18 |     **3.93%** |                            1 |  **0.327** |        0.0986 |
-| **Exp 2 — No-Mosaic**    |         0.5507 |          0.6782 |                         34 |         7.42% |                            0 |      0.310 |        0.0937 |
-| **Exp 3 — Cropping**     |     **0.5691** |          0.6976 |                         23 |         5.02% |                            3 |      0.323 |    **0.1010** |
+Therefore, Exp2 should be compared with Exp1 when assessing the effect of removing Mosaic under this configuration.
 
-These results provide a more complete picture than relying on a single metric.
+It is not a direct baseline-to-zero-Mosaic comparison.
+
+Experiment 3
+
+Exp3 extended Exp1 with crack-focused crop augmentation.
+
+The training dataset changed from:
+
+2,796 → 4,593 images
+
+The background share changed from:
+
+34.3% → 20.9%
+
+The crops were:
+
+224 × 224
+upscaled 2× to 448 × 448 when the crop dataset was generated
+added to the original training images rather than replacing them
+
+The crop-generation process created:
+
+1,797 crops
+from 1,836 positive training images
+with 39 positive images skipped
+
+Validation and test sets were not changed.
+
+The crops were therefore a training-only augmentation strategy.
+
+5.5 Unified Experiment Comparison
+
+All experiments were compared at the common confidence threshold of 0.25.
+
+Experiment	Crack IoU	Crack Dice	Missed	Miss Rate	FP	mAP50	mAP50-95
+Baseline	0.5588	0.6859	31	6.77%	0	0.319	0.0969
+Exp1	0.5677	0.6992	18	3.93%	1	0.327	0.0986
+Exp2	0.5507	0.6782	34	7.42%	0	0.310	0.0937
+Exp3	0.5691	0.6976	23	5.02%	3	0.323	0.1010
+
+The results show that Exp1 had:
+
+the lowest miss rate
+the fewest missed crack images among the four configurations
+the highest mAP50
+slightly higher IoU and Dice than the baseline
+
+Exp3 had the highest crack IoU and mAP50-95, but also more misses and false positives than Exp1 at the common threshold.
+
+5.6 Baseline
+
+The baseline achieved:
+
+Crack Mean IoU: 0.5588
+Crack Mean Dice: 0.6859
+Missed crack images: 31 / 458
+Miss rate: 6.77%
+False positives: 0 / 239
+mAP50: 0.319
+mAP50-95: 0.0969
+
+The baseline served as the reference point for evaluating the subsequent configuration changes.
+
+5.7 Experiment 1 — Combined Augmentation Configuration
+
+At the common comparison threshold of 0.25, Exp1 achieved:
+
+Crack Mean IoU: 0.5677
+Crack Mean Dice: 0.6992
+Missed crack images: 18 / 458
+Miss rate: 3.93%
+False positives: 1 / 239
+mAP50: 0.327
+mAP50-95: 0.0986
+
+The validation threshold sweep for Experiment 1 (Section 9.5) shows that at confidence 0.07 the model missed 4 / 458 crack images (0.87%) with 7 / 239 background false positives. At the common comparison threshold of 0.25, Experiment 1 missed 18 / 458 (3.93%).
+
+The previously reported 0.87% figure is therefore supported by the retained threshold-sweep results rather than being treated as an unverified value.
+
+Exp1 should not be described as a small-crack-specific experiment because multiple variables were changed simultaneously.
+
+5.8 Experiment 2 — Mosaic Removal
+
+Exp2 removed Mosaic from the Exp1 configuration:
+
+Mosaic 0.5 → 0
+
+At confidence 0.25, Exp2 achieved:
+
+Crack Mean IoU: 0.5507
+Crack Mean Dice: 0.6782
+Missed: 34 / 458
+Miss rate: 7.42%
+FP: 0 / 239
+mAP50: 0.310
+mAP50-95: 0.0937
+Very-small crack subset
+
+The same eight very-small crack images were evaluated across configurations:
+
+Experiment	Mean IoU	Images with IoU < 0.5
+Baseline	0.0768	7 / 8
+Exp1	0.2523	5 / 8
+Exp2	0.0000	8 / 8
+Exp3	0.1759	4 / 8
+
+On this small 8-image sample, removing Mosaic was associated with a drop from Exp1's 0.2523 mean IoU to 0.0000 in Exp2.
+
+This is an indicator rather than conclusive evidence, because the evaluated subset contains only eight images.
+
+5.9 Experiment 3 — Crack-Focused Cropping Extension
+
+Exp3 extended Exp1 with additional training crops.
+
+The training dataset increased from:
+
+2,796 → 4,593 images
+
+The background proportion decreased from:
+
+34.3% → 20.9%
+
+A total of:
+
+1,797 crops
+were generated from 1,836 positive images
+with 39 images skipped
+
+The crops were 224 × 224 and were upscaled 2× to 448 × 448 during dataset generation before being added to the original training images.
+
+At confidence 0.25, Exp3 achieved:
+
+Crack Mean IoU: 0.5691
+Crack Mean Dice: 0.6976
+Missed: 23 / 458
+Miss rate: 5.02%
+FP: 3 / 239
+mAP50: 0.323
+mAP50-95: 0.1010
+
+Exp3 therefore produced the highest crack IoU and mAP50-95 among the four configurations, but it did not minimize missed detections or false positives.
+
+Very-small subset
+
+On the same eight very-small images:
+
+Baseline: 0.0768
+Exp1: 0.2523
+Exp2: 0.0000
+Exp3: 0.1759
+
+Exp3 was better than Baseline and Exp2 on this subset, but worse than Exp1.
+
+Therefore, cropping cannot be considered a general improvement for the very-small subset. The subset contains only eight images, so the comparison should be treated as a small diagnostic rather than a general conclusion.
+
+5.10 Experiment Selection
+
+At the common validation confidence threshold of 0.25:
+
+Exp1 had the lowest miss rate: 3.93%
+Exp1 had the fewest missed crack images: 18 / 458
+Exp1 had the highest mAP50: 0.327
+Exp3 had slightly higher crack IoU: 0.5691
+Exp3 had the highest mAP50-95: 0.1010
+Exp3 also had more false positives: 3 / 239
+
+Exp1 was therefore selected for the subsequent confidence-threshold sweep and final held-out test evaluation.
+
+This selection should be understood as a practical project decision, rather than as a formally pre-registered selection rule in the notebook.
+
+The comparison also uses a single seed per experiment, and the observed differences are relatively small. They should therefore not be interpreted as statistically conclusive.
+
+Because Exp1 changed several variables simultaneously, the results cannot isolate the contribution of any individual augmentation.
+
+6. Evaluation Methodology
+6.1 Why Multiple Metrics
+
+No single metric fully describes segmentation quality.
+
+The evaluation therefore considered:
+
+IoU
+Dice
+missed crack images
+miss rate
+false positives
+background rejection
+mAP50
+mAP50-95
+source-level performance
+
+This combination separates:
+
+pixel-level segmentation quality
+image-level crack detection
+background rejection
+source-specific generalization
+6.2 IoU
+
+Intersection over Union was calculated as:
+
+[
+IoU = \frac{|Prediction \cap GroundTruth|}
+{|Prediction \cup GroundTruth|}
+]
+
+IoU measures the overlap between predicted and ground-truth crack regions.
+
+Higher IoU indicates better spatial agreement.
+
+6.3 Dice
+
+Dice similarity was calculated as:
+
+[
+Dice = \frac{2|Prediction \cap GroundTruth|}
+{|Prediction| + |GroundTruth|}
+]
+
+Dice is generally more forgiving than IoU when the predicted and target regions have partial overlap.
+
+6.4 Special Cases
+
+For crack-only evaluation:
+
+missed crack images contribute IoU = 0
+missed crack images contribute Dice = 0
+
+For the overall test evaluation, an image with both an empty ground truth and an empty prediction is treated as a correct empty-empty case.
+
+This distinction is important because overall metrics and crack-only metrics answer different questions.
+
+6.5 Prediction Rasterization
+
+YOLO inference returns binary instance masks through:
+
+result.masks.data
+
+The predicted masks are resized to 448 × 448 using nearest-neighbor interpolation and merged into one binary crack mask using a pixel-wise maximum operation.
+
+The ground truth used for this evaluation is not the original raster mask.
+
+Instead, it is the YOLO polygon label representation rasterized back into a binary mask using:
+
+cv2.fillPoly
+
+Therefore, the evaluation target includes the effects of the mask-to-polygon conversion and subsequent polygon rasterization.
+
+This means that effects such as filled holes or dropped tiny contours can be reflected in the evaluation target.
+
+6.6 Multiple Predicted Instances
+
+Because YOLO segmentation can return multiple predicted instances for a single image, all predicted binary masks were merged into one image-level crack mask.
+
+This creates an image-level binary segmentation evaluation rather than an instance-by-instance matching evaluation.
+
+The approach is appropriate for the project's primary question:
+
+How accurately can the system identify and localize crack pixels in an image?
+
+7. Error Analysis
+7.1 Final Test Set
+
+The final held-out test set contained:
+
+1,695 images
+1,474 crack images
+221 background images
+
+The final operating configuration was:
+
+Experiment 1 + confidence threshold 0.07
+
+The test set was not used for threshold selection.
+
+7.2 Test Recall and Miss Rate
+
+On the 1,474 crack images:
+
+Detected: 1,302
+Missed: 172
+Detection/recall: 88.33%
+Miss rate: 11.67%
+
+In this analysis, a crack image is counted as detected if the model produces any non-empty predicted mask.
+
+Detection therefore does not imply accurate segmentation.
 
 For example:
 
-* Experiment 1 achieved the best validation miss rate.
-* Experiment 3 achieved the highest Crack Mean IoU.
-* Experiment 3 achieved the highest Mask mAP50-95.
-* Experiment 2 performed worse than Experiment 1 across the major crack-segmentation metrics.
+CrackTree200 miss rate: 3.23%
+CrackTree200 mean IoU: 0.0548
 
----
+This shows that a model can detect the presence of a crack while producing poor spatial segmentation.
 
-## 5.6 Baseline
+7.3 Background Rejection
 
-The baseline model achieved:
+Among the 221 background test images:
 
-```text
-Crack Mean IoU: 0.5588
-Crack Mean Dice: 0.6859
-Missed cracks: 31 / 458
-Miss rate: 6.77%
-False positives: 0 / 239
-Mask mAP50: 0.319
-Mask mAP50-95: 0.0969
-```
-
-The baseline established a reference point for evaluating subsequent modifications.
-
-Without a baseline, it would not be possible to determine whether an augmentation or preprocessing change actually improved the system.
-
----
-
-## 5.7 Experiment 1 — Small-Crack Focused Augmentation
-
-Experiment 1 introduced augmentation intended to improve robustness to small and difficult crack patterns.
-
-The results were:
-
-```text
-Crack Mean IoU: 0.5677
-Crack Mean Dice: 0.6992
-Missed cracks: 18 / 458
-Miss rate: 3.93%
-False positives: 1 / 239
-Mask mAP50: 0.327
-Mask mAP50-95: 0.0986
-```
-
-Compared with the baseline:
-
-```text
-Missed cracks:
-31 → 18
-
-Miss rate:
-6.77% → 3.93%
-
-Crack Mean IoU:
-0.5588 → 0.5677
-
-Crack Mean Dice:
-0.6859 → 0.6992
-```
-
-This provided evidence that the augmentation strategy improved the model's ability to detect crack-containing validation images.
-
-At the default confidence threshold of **0.25**, Experiment 1 missed:
-
-```text
-18 / 458 = 3.93%
-```
-
-The final operating confidence threshold was later set to:
-
-```text
-0.07
-```
-
-However, the previously reported **0.87% miss-rate value is not included as a verified result**, because the threshold-sweep output that supposedly produced that number was not retained in the reviewed notebook.
-
----
-
-## 5.8 Experiment 2 — No-Mosaic Ablation
-
-Experiment 2 removed Mosaic augmentation.
-
-The motivation was to investigate whether Mosaic was contributing meaningfully to the model's ability to learn small and spatially difficult crack patterns.
-
-The results were:
-
-```text
-Crack Mean IoU: 0.5507
-Crack Mean Dice: 0.6782
-Missed cracks: 34 / 458
-Miss rate: 7.42%
-False positives: 0 / 239
-Mask mAP50: 0.310
-Mask mAP50-95: 0.0937
-```
-
-Compared with Experiment 1:
-
-```text
-Crack Mean IoU:
-0.5677 → 0.5507
-
-Missed cracks:
-18 → 34
-```
-
-The experiment also showed a notable result for the evaluated very-small crack subset:
-
-```text
-Very-small cracks:
-8 / 8 missed
-IoU = 0.0
-```
-
-This provides evidence that disabling Mosaic harmed performance on the evaluated very-small crack cases.
-
-The correct engineering interpretation is not that Mosaic is universally necessary for every crack segmentation problem.
-
-Rather:
-
-> In this dataset and experimental setup, removing Mosaic was associated with poorer performance, particularly on the evaluated very-small crack subset.
-
----
-
-## 5.9 Experiment 3 — Crack-Focused Cropping
-
-Experiment 3 investigated crack-focused cropping.
-
-The cropping strategy increased the number of training images to:
-
-```text
-4,593 images
-```
-
-The motivation was to increase the visual prominence of crack regions and expose the model to more localized crack patterns.
-
-The results were:
-
-```text
-Crack Mean IoU: 0.5691
-Crack Mean Dice: 0.6976
-Missed cracks: 23 / 458
-Miss rate: 5.02%
-False positives: 3 / 239
-Mask mAP50: 0.323
-Mask mAP50-95: 0.1010
-```
-
-Experiment 3 achieved:
-
-* highest Crack Mean IoU: **0.5691**
-* highest Mask mAP50-95: **0.1010**
-
-The very-small crack analysis also showed:
-
-```text
-Very-small crack IoU:
-0.0 → 0.1759
-```
-
-and:
-
-```text
-4 of the 8 previously missed very-small cracks were recovered
-```
-
-However, this improvement came with a trade-off:
-
-```text
-False positives:
-0 → 3
-```
-
-Therefore, cropping improved performance on some difficult small-crack cases but also increased false detections on background images.
-
-This is an important engineering trade-off rather than a simple "cropping is better" conclusion.
-
----
-
-## 5.10 Experiment Selection
-
-The experiments produced different strengths.
-
-### Experiment 1
-
-Best for:
-
-* lowest validation miss rate
-* strongest crack detection among the evaluated runs
-* good balance between recall and false positives
-
-### Experiment 3
-
-Best for:
-
-* highest Crack Mean IoU
-* highest Mask mAP50-95
-* improved very-small crack segmentation
-
-But it also introduced more false positives.
-
-### Experiment 2
-
-Performed worst among the compared configurations on the major validation segmentation metrics and had the highest number of missed cracks.
-
-Therefore, the experimental evidence favored retaining Mosaic-based augmentation and treating crack-focused cropping as a promising direction requiring further refinement rather than an unconditional replacement.
-
----
-
-# 6. Evaluation Methodology
-
-## 6.1 Why Multiple Metrics Were Used
-
-A single metric cannot fully describe the behavior of a crack segmentation system.
-
-The project therefore used:
-
-* Crack Mean IoU
-* Crack Mean Dice
-* missed crack count
-* miss rate
-* false positives on background images
-* Mask mAP50
-* Mask mAP50-95
-
-The custom pixel-level metrics were particularly useful because crack regions can be thin and irregular.
-
----
-
-## 6.2 Intersection over Union
-
-For a predicted binary mask $P$ and ground-truth mask $G$:
-
-$$
-IoU = \frac{|P \cap G|}{|P \cup G|}
-$$
-
-IoU measures the overlap between the predicted crack region and the ground-truth crack region.
-
-Higher values indicate better spatial agreement.
-
----
-
-## 6.3 Dice Score
-
-The Dice score was calculated as:
-
-$$
-Dice = \frac{2|P \cap G|}{|P| + |G|}
-$$
-
-Dice is especially useful when dealing with relatively small foreground regions because it emphasizes overlap between the predicted and ground-truth pixels.
-
----
-
-## 6.4 Special Cases
-
-The evaluation implementation explicitly handled zero-area cases.
-
-If:
-
-```text
-Ground truth = empty
-Prediction = empty
-```
-
-then:
-
-```text
-IoU = 1.0
-Dice = 1.0
-```
-
-If:
-
-```text
-Ground truth contains crack
-Prediction is empty
-```
-
-then:
-
-```text
-IoU = 0.0
-Dice = 0.0
-```
-
-This prevented undefined values from appearing in the evaluation.
-
----
-
-## 6.5 Prediction Rasterization
-
-YOLO outputs segmentation polygons.
-
-For pixel-level evaluation, the predicted polygons were rasterized to the same resolution as the ground-truth masks:
-
-```text
-448 × 448
-```
-
-This ensured that prediction and ground truth were compared in the same pixel coordinate space.
-
----
-
-## 6.6 Multiple Predicted Instances
-
-When multiple crack instances were predicted for one image, the individual predictions were combined into one unified binary crack mask.
-
-The combination was performed using pixel-wise logical union / maximum operation.
-
-The final result was therefore a single binary prediction mask representing all predicted crack regions in the image.
-
----
-
-## 6.7 Evaluation Output
-
-The evaluation process generated per-image measurements including:
-
-```text
-image
-gt_pixels
-gt_area_pct
-pred_pixels
-pred_area_pct
-iou
-dice
-error_type
-```
-
-This allowed the project to move beyond aggregate metrics and investigate individual failure cases.
-
----
-
-# 7. Error Analysis
-
-## 7.1 Final Test Set
-
-The final test set contained:
-
-```text
-1,695 images
-```
-
-The final test analysis identified:
-
-```text
-1,474 crack-containing images
-221 background-only images
-```
-
-The results were:
-
-| Test Outcome                | Number of Images | Percentage |
-| :-------------------------- | :--------------: | :--------: |
-| **Total Test Images**       |       1,695      |   100.00%  |
-| **Crack-Containing Images** |       1,474      |   86.96%   |
-| ├─ Detected Cracks          |       1,302      |   88.33%   |
-| └─ Missed Cracks (FN)       |        172       |   11.67%   |
-| **Background-Only Images**  |        221       |   13.04%   |
-| ├─ Correctly Rejected (TN)  |        212       |   95.93%   |
-| └─ False Positives (FP)     |         9        |    4.07%   |
-
----
-
-## 7.2 Test Recall and Miss Rate
-
-For crack-containing images:
-
-$$
-\text{Recall} = \frac{1302}{1474} = 88.33\%
-$$
-
-The corresponding miss rate was:
-
-$$
-\text{Miss Rate} = \frac{172}{1474} = 11.67\%
-$$
-
-This means the final system detected cracks in approximately 88 out of every 100 crack-containing test images, while missing approximately 12 out of every 100.
-
----
-
-## 7.3 Background Rejection
-
-Among the 221 background-only test images:
-
-```text
-Correctly rejected = 212
-False positives = 9
-```
+Correctly rejected: 212
+False positives: 9
 
 Therefore:
 
-```text
-Background rejection rate = 95.93%
-False-positive rate among background images = 4.07%
-```
+Background rejection: 95.93%
+False-positive rate among background images: 4.07%
 
-This demonstrates that the system was generally able to avoid generating crack detections on background-only images, although false positives remained.
+This indicates that the final model generally rejected background images successfully, but still produced non-empty predictions on a small number of negative samples.
 
----
+7.4 Source-Level Error Distribution
 
-## 7.4 Source-Level Error Distribution
+The final crack-image results by source were:
 
-The 172 missed crack images were further analyzed by source.
+Source	Crack Images	Missed	Miss Rate	Mean IoU
+Rissbilder	567	136	23.99%	0.2038
+CRACK500	505	4	0.79%	0.6054
+Volker	148	9	6.08%	0.2494
+DeepCrack	78	2	2.56%	0.6000
+GAPS384	76	16	21.05%	0.2641
+CrackTree200	31	1	3.23%	0.0548
+Sylvie Chambon	25	4	16.00%	0.1002
+CFD	18	0	0.00%	0.4639
+forest	18	0	0.00%	0.5081
+Eugen Muller	8	0	0.00%	0.1738
+Total	1,474	172	11.67%	0.3719
 
-| Source Domain           | Missed Crack Images | Percentage of Total Misses |
-| :---------------------- | :-----------------: | :------------------------: |
-| **Rissbilder**          |         136         |           79.07%           |
-| **GAPS384**             |          16         |            9.30%           |
-| **Other Sources**       |          20         |           11.63%           |
-| **Total Missed Cracks** |       **172**       |         **100.00%**        |
+Rissbilder is particularly important:
 
-The most important observation is that:
+Rissbilder represents only 38.5% of crack images in the test set (567 / 1,474), yet accounts for 79.07% of all misses (136 / 172).
 
-```text
-Rissbilder + GAPS384
-= 152 / 172 missed images
-= 88.37% of all misses
-```
+This indicates that the overall test error is strongly influenced by one source domain.
 
-This concentration suggests a possible **source/domain generalization gap**.
+However, unseen-source status alone does not explain the result. Rissbilder was absent from training, but DeepCrack was also an unseen source and achieved:
 
-In other words, the problem is not necessarily only that the model is "weak."
+2.56% miss rate
+0.6000 mean IoU
 
-The model may be encountering visual characteristics in specific source domains that differ from the patterns represented sufficiently during training.
+This suggests that source-specific visual or annotation characteristics are likely important.
 
----
+7.5 Crack Size and Difficulty
 
-## 7.5 Crack Size and Difficulty
+The test crack images were grouped by approximate crack area:
 
-The error analysis also showed that thin and very small cracks were more difficult to detect than larger surface fractures.
+Size	Images	Missed	Miss Rate
+Very small (<0.5%)	61	10	16.4%
+Small (0.5–1%)	82	9	11.0%
+Medium (1–5%)	939	139	14.8%
+Large (≥5%)	392	14	3.6%
 
-This is consistent with the experimental results:
+The largest absolute contribution to missed detections came from the Medium category:
 
-* removing Mosaic harmed the evaluated very-small crack subset
-* crack-focused cropping improved very-small crack IoU
-* some small crack instances remained difficult even after augmentation
+139 of 172 misses (81%)
 
-This suggests that **small-object visibility and spatial resolution** are important factors in the problem.
+Therefore, the test failures cannot be explained simply by very-small cracks.
 
----
+The medium-sized category contains the majority of the missed images, and crack size is also potentially confounded with source distribution.
 
-## 7.6 Runtime and Reproducibility Issues
+A previous eight-image very-small diagnostic showed that Exp3 did not outperform Exp1 on that subset:
 
-Several runtime issues occurred during notebook execution.
+Exp1: 0.2523
+Exp3: 0.1759
 
-These were implementation/environment issues and should not be interpreted as model-performance failures.
+Therefore, the evidence does not support a broad claim that cropping solved the very-small-crack problem.
 
-### Contrast Analysis
+7.6 Runtime and Reproducibility Issues
 
-Some contrast-analysis cells produced an error similar to:
+The project was developed primarily in Google Colab.
 
-```text
-Could not read image: ...
-```
+The current repository does not yet contain:
 
-The issue was caused by an incorrect/local image path before the required images were correctly loaded or indexed.
+a fully packaged training notebook
+pinned requirements.txt
+trained weights
+all experiment CSV outputs
+a formal dataset source/license record
+one unified CLI/configuration for training and evaluation
 
-This was a file-access/path issue rather than evidence that the images themselves were corrupted.
+Training paths are also environment-specific.
 
-### Google Drive Save
+The retained threshold sweep and evaluation outputs improve reproducibility, but a future version should package the complete experimental environment more systematically.
 
-A later cell attempting to inspect/save information involving the test image directory produced:
+7.7 Test Ground-Truth Fragmentation
 
-```text
-PermissionError: Operation not permitted
-```
+The validation labels contain approximately:
 
-This occurred during Google Drive file handling.
+1,094 polygon objects
+over 458 crack images
+approximately 2.4 objects/image
 
-The practical solution was to avoid unnecessarily copying very large image directories to Drive and instead preserve only the required artifacts, such as:
+The test labels contain approximately:
 
-```text
-best.pt
-evaluation CSVs
-results
-```
+32,088 polygon objects
+over 1,474 crack images
+approximately 21.8 objects/image
 
-These runtime issues should be documented for reproducibility but are separate from the actual model results.
+This large difference may reflect:
 
----
+source-specific annotation style
+JPEG artifacts above the conversion threshold
+fragmented masks
 
-# 8. Engineering Decisions
+It likely contributes to the lower test IoU.
 
-## 8.1 Preserve the Source Dataset
+The cause was not investigated in this project and should therefore be treated as a hypothesis rather than a confirmed explanation.
 
-The original dataset was not destructively reorganized.
+7.8 Validation–Test Performance Gap
 
-Instead:
+Exp1 achieved:
 
-```text
-Original Dataset
-       ↓
-Reproducible Preparation Script
-       ↓
-Generated YOLO Dataset
-```
+Validation mean IoU: 0.5908
+Validation Dice: 0.7275
 
-This makes it possible to reproduce the training dataset from the original data.
+At the same confidence threshold of 0.07, the final test results were:
 
----
+Test mean IoU: 0.3719
+Test Dice: 0.4907
 
-## 8.2 Global Mask Lookup
+The difference is substantial.
 
-Because the original directory structure contained inconsistent local split organization, the preparation script used a global image-mask mapping.
+Validation was drawn from CRACK500 and CFD, which were also represented in training, whereas 66% of test crack images came from sources absent from training.
 
-This avoided incorrectly labeling images as missing annotations simply because their corresponding masks were stored elsewhere.
+Validation may also be somewhat optimistic because the leakage check was filename-based and related CRACK500 tiles could potentially appear across train and validation.
 
----
+The gap therefore provides evidence that in-domain validation performance does not fully represent cross-source generalization.
 
-## 8.3 Lock the Test Set First
+8. Engineering Decisions
+8.1 Preserve the Source Dataset
 
-The test set was locked before constructing the train/validation subsets.
+The original dataset was preserved rather than modifying it directly.
 
-This protects the final evaluation set from accidental contamination during dataset construction.
+This allowed the project to retain:
 
----
+original masks
+original images
+source information
+the ability to reconstruct or audit preprocessing decisions
 
-## 8.4 Explicit Background Handling
+Derived datasets were created separately.
 
-Background images were deliberately included rather than treating them as noise.
+8.2 Global Mask Lookup
 
-This was important because a real infrastructure inspection system must not only detect cracks when they exist; it must also avoid generating detections on normal surfaces.
+The initial directory mismatch motivated a global image-mask lookup.
 
----
+This prevented potentially valid image-mask pairs from being discarded simply because the files were not stored together in the initially inspected directories.
 
-## 8.5 Use a Baseline Before Optimization
+8.3 Lock Test Set First
 
-The baseline provided a measurable reference point.
+The test set was kept separate from training and validation experimentation.
 
-Without it, improvements such as augmentation or cropping could not be evaluated objectively.
+Model configuration and threshold decisions were made using validation results.
 
----
+The final held-out test set was then used to estimate generalization performance.
 
-## 8.6 Controlled Experiments
+8.4 Explicit Background Handling
 
-Each experiment was designed to investigate a specific question.
+Background images were explicitly included in the working dataset.
 
-### Experiment 1
+This enabled measurement of:
 
-> Does targeted augmentation improve robustness to small/difficult cracks?
+false positives
+background rejection
+practical image-level behavior
 
-### Experiment 2
+This is important for an inspection system because repeatedly flagging crack-free images can create unnecessary manual inspection workload.
 
-> How much does removing Mosaic affect crack segmentation?
+8.5 Baseline Before Optimization
 
-### Experiment 3
+A baseline configuration was trained before evaluating additional configurations.
 
-> Can crack-focused cropping improve the representation of difficult crack regions?
+This established a reference point for:
 
-This experimental approach turned model improvement into an evidence-driven process rather than random hyperparameter tuning.
+IoU
+Dice
+miss rate
+false positives
+mAP
 
----
+Without a baseline, later changes would be difficult to interpret.
 
-## 8.7 Evaluate at Pixel Level
+8.6 Configuration Comparisons
 
-Because cracks can be thin, elongated, and irregular, image-level accuracy alone would not adequately represent segmentation quality.
+The project used targeted configuration comparisons rather than unstructured trial-and-error tuning.
 
-Pixel-level IoU and Dice therefore provided an additional view of spatial segmentation quality.
+However, Exp1 changed multiple variables simultaneously.
 
----
+Therefore, the experiment provides evidence about the combined configuration, not about the independent contribution of each augmentation.
 
-# 9. Limitations
+8.7 Evaluate at Pixel Level
 
-Several limitations remain.
+mAP alone was not sufficient for this project because infrastructure inspection requires spatially meaningful crack localization.
 
-### 9.1 Domain Generalization
+Custom pixel-level metrics were therefore used:
 
-The concentration of missed detections in Rissbilder and GAPS384 suggests that the model may not generalize equally well across all source domains.
+per-image IoU
+per-image Dice
+crack-only averages
+source-level segmentation quality
 
----
+This exposed cases where detection succeeded but segmentation quality remained poor.
 
-### 9.2 Small and Thin Cracks
+8.8 Separate Detection from Segmentation
 
-Very small cracks remain challenging.
+The evaluation intentionally distinguished:
 
-Even though cropping improved the evaluated very-small subset, the overall test analysis still showed missed crack images.
+whether a crack was detected at all
+how accurately its pixels were segmented
 
----
+This distinction is particularly important in cases such as CrackTree200, where the miss rate was low but the mean IoU was only 0.0548.
 
-### 9.3 False Positives
+8.9 Treat Source-Level Performance as a First-Class Metric
 
-The final test set contained:
+Overall averages can hide severe source-specific failures.
 
-```text
-9 false positives / 221 background images
-```
+The Rissbilder results demonstrate this clearly:
 
-Experiment 3 also increased validation false positives from:
+38.5% of test crack images
+79.07% of all misses
 
-```text
-0 → 3
-```
+Therefore, source-level analysis was necessary to understand where the model actually fails.
 
-This demonstrates that improving sensitivity can introduce a trade-off with specificity.
+9. Limitations
+9.1 Domain Generalization
 
----
+The largest limitation is the difference between training/validation sources and the heterogeneous test set.
 
-### 9.4 Dataset Composition
+The final test performance is substantially lower than validation performance.
 
-The test set contains a high proportion of crack-containing images:
+This indicates that the model does not generalize equally well across source domains.
 
-```text
-1,474 / 1,695 = 86.96%
-```
+9.2 Small and Thin Cracks
 
-Therefore, test-set image-level recall is useful but should not be interpreted as a complete representation of deployment conditions.
+Small and thin cracks remain challenging.
 
-A real infrastructure inspection environment may contain substantially more normal/background images.
+However, the error analysis does not support the conclusion that very-small cracks are the sole or dominant cause of failures.
 
----
+The largest number of missed images occurred in the Medium category:
 
-### 9.5 Threshold Sweep Reproducibility
+139 / 172 misses
+81%
 
-The final operating confidence threshold was:
+The very-small category accounted for only:
 
-```text
-0.07
-```
+10 / 172 misses
 
-However, the previously mentioned validation miss rate of **0.87% at that threshold is not retained in the reviewed notebook**.
+The eight-image configuration comparison should therefore be treated as a diagnostic rather than a general conclusion.
 
-Therefore, that number was intentionally excluded from the verified results.
+9.3 False Positives
 
-This highlights an important reproducibility lesson:
+The final model produced:
 
-> Threshold-selection experiments should be saved as explicit result tables rather than relying on temporary notebook output.
+9 false positives
+among 221 background images
 
----
+Although the background rejection rate was high at 95.93%, the remaining false positives indicate that additional hard-negative analysis may be useful.
 
-# 10. Future Work
+9.4 Dataset Composition
 
-## 10.1 Domain-Aware Training
+The working dataset contains only:
 
-Because most missed test cases originated from specific source domains, future work should investigate:
+5,188 of the original 11,298 images
 
-* source-aware sampling
-* domain-balanced training
-* source-specific augmentation
-* domain adaptation
-* additional images from underperforming domains
+Therefore:
 
----
+6,110 original images were not used in the current training/validation/test pipeline.
 
-## 10.2 Small-Crack Enhancement
+This limits the diversity represented by the current model and should be investigated before concluding that additional data would not help.
 
-Future experiments should investigate methods specifically targeting thin and small cracks, including:
+9.5 Confidence Threshold Sweep Reproducibility
 
-* higher-resolution training
-* multi-scale training
-* small-object-aware augmentation
-* patch-based training
-* adaptive cropping
-* stronger feature-preserving preprocessing
+The Exp1 validation threshold sweep was retained in:
 
----
+threshold_tuning_exp1_fine.csv
 
-## 10.3 Improved Cropping Strategy
+and the corresponding notebook results were recorded in the threshold-tuning evaluation cell.
 
-Experiment 3 demonstrated that cropping can improve very-small crack segmentation but also increase false positives.
+The previous 0.87% figure is therefore supported:
 
-A future version could therefore use:
+4 / 458 = 0.87%
 
-* crack-aware crop selection
-* controlled crop ratios
-* mixed original + cropped images
-* background-preserving crops
-* hard-negative mining
+The limitation is not the existence of the sweep, but rather that:
 
-The goal would be to retain the small-crack benefit without unnecessarily increasing false positives.
+the sweep was performed only for Exp1
+there was no equivalent per-experiment optimal-threshold sweep
+the selection was not formally pre-registered
 
----
+Therefore, 0.07 should be interpreted as the selected practical operating threshold for Exp1, not as a universally optimal threshold.
 
-## 10.4 Hard-Negative Mining
+9.6 Test mAP Was Not Calculated
 
-The false-positive images could be collected and reintroduced during training as hard negatives.
+The final held-out test evaluation focused on custom pixel-level and image-level metrics:
 
-This could help the model learn to distinguish:
+IoU
+Dice
+detection/recall
+missed images
+false positives
+background rejection
+source-level results
 
-```text
-Actual crack
-vs.
-Crack-like surface texture
-```
+mAP was not calculated on the final test set.
 
----
+Therefore, no test mAP conclusion should be inferred from this report.
 
-## 10.5 Threshold Optimization
+9.7 Unused Dataset Images
 
-A reproducible threshold sweep should be implemented and saved to a structured result file.
+The current working dataset uses 5,188 of the original 11,298 images.
 
-For example:
+The remaining:
 
-```text
-confidence
-miss_rate
-recall
-false_positive_rate
-mean_iou
-mean_dice
-```
+6,110 images
 
-This would allow the final operating threshold to be selected according to the actual deployment objective.
+were not incorporated into the current experiments.
 
----
+Their source distribution, annotation quality, and usefulness for training were not fully investigated.
 
-## 10.6 Deployment-Oriented Evaluation
+9.8 Ambiguous Empty Masks
+
+Among the 1,454 empty masks, 43 were not clearly identified as intentional background images.
+
+These ambiguous cases were not automatically assigned a semantic meaning.
+
+Further inspection is required before using them for negative sampling or training.
+
+9.9 Annotation and Polygon Conversion
+
+The conversion from raster masks to polygon labels can introduce differences between the original raster representation and the YOLO representation.
+
+Potential effects include:
+
+contour fragmentation
+small components
+filled holes
+dropped or altered structures
+source-dependent polygon complexity
+
+In addition, threshold conventions are not completely identical across all analysis scripts:
+
+prepare_yolo_dataset.py: >127
+visualize_samples.py: ≥127
+dataset_statistics.py: ≥128
+mask_analysis.py: checks max() == 0
+
+These differences are small and do not materially change the main reported result, but they should be standardized for stronger reproducibility.
+
+9.10 Experimental and Reproducibility Limitations
+
+The experiments used:
+
+one seed for Baseline
+one seed for Exp1–Exp3
+a 50-epoch training budget
+
+The models were still showing increasing mAP near the end of training.
+
+Therefore:
+
+results may vary across seeds
+the models may not be fully converged
+small differences between configurations should not be overinterpreted
+
+The current repository also lacks a fully pinned environment, complete experiment artifacts, trained weights, and formal dataset metadata.
+
+10. Future Work
+10.1 Domain-Aware Training
+
+The strongest next step is to investigate source-specific performance.
+
+In particular:
+
+analyze Rissbilder failure cases
+compare image appearance across sources
+inspect annotation style
+measure crack-size distribution per source
+identify source-specific preprocessing differences
+
+The objective should be to understand why some unseen domains generalize well while others fail substantially.
+
+10.2 Small-Crack Enhancement
+
+Future experiments can investigate:
+
+higher-resolution training
+alternative crop strategies
+stronger thin-object augmentation
+morphology-aware preprocessing
+segmentation architectures designed for thin structures
+
+The very-small subset should be evaluated on a larger sample before making general claims.
+
+10.3 Improved Cropping Strategy
+
+Exp3 showed that cropping can change the training distribution, but the eight-image very-small comparison did not demonstrate a general improvement over Exp1.
+
+Future crop strategies should therefore be evaluated using:
+
+larger crack-size subsets
+source-balanced subsets
+controlled comparisons
+multiple seeds
+
+The goal should be to improve small-crack representation without reducing generalization or increasing false positives.
+
+10.4 Hard-Negative Mining
+
+The nine test false positives should be inspected individually.
+
+Potential hard negatives include:
+
+texture patterns
+shadows
+edges
+stains
+surface discontinuities
+background structures resembling cracks
+
+These images can inform future background sampling.
+
+10.5 Threshold Optimization
+
+A broader threshold study could evaluate:
+
+multiple experiments
+per-source behavior
+precision-recall trade-offs
+detection versus segmentation quality
+operational cost of false positives versus missed cracks
+
+The final threshold should ideally be selected using an explicitly defined objective.
+
+10.6 Deployment-Oriented Evaluation
 
 Future evaluation should include:
 
-* inference latency
-* memory usage
-* model size
-* throughput
-* confidence calibration
-* robustness to different image conditions
+inference latency
+throughput
+GPU/CPU memory
+model size
+confidence calibration
+image preprocessing cost
+batch versus single-image inference
 
-This would move the project from an experimental segmentation model toward a deployable inspection system.
+These metrics are necessary before considering deployment in a real inspection pipeline.
 
----
+10.7 Real-World Infrastructure Workflow
 
-## 10.7 Real-World Infrastructure Workflow
+A production-oriented system could eventually integrate:
 
-A future system could extend the current segmentation model into a complete inspection pipeline:
+Image Acquisition → Crack Detection → Segmentation → Severity Estimation → Location/Tracking → Inspection Report
 
-```text
-Image / Camera
-      ↓
-Crack Detection & Segmentation
-      ↓
-Crack Localization
-      ↓
-Crack Area / Geometry
-      ↓
-Severity Estimation
-      ↓
-Inspection Report
-      ↓
-Historical Monitoring
-```
+The segmentation model would therefore become one component within a larger infrastructure-inspection workflow.
 
-This would transform the current computer-vision model into a broader infrastructure-inspection solution.
+10.8 Dataset and Evaluation Expansion
 
----
+The next dataset iteration should include:
 
-# 11. Final Results
+Investigating the 6,110 unused images
+determine their sources
+inspect annotation quality
+evaluate their usefulness
+recover valid annotated samples where appropriate
+Reviewing the 43 ambiguous empty masks
+determine whether they are true backgrounds
+identify annotation errors
+document their final treatment
+Investigating test-label fragmentation
+inspect why test labels contain approximately 21.8 polygon objects/image compared with approximately 2.4 in validation
+determine whether this is source-related or conversion-related
+Stronger leakage analysis
+perceptual hashing
+near-duplicate detection
+grouping by parent image
+source-aware splitting
+Multi-seed experiments
+repeat important configurations with multiple random seeds
+report mean and variance
+determine whether small configuration differences are stable
 
-## 11.1 Final Test Performance
+Increasing the diversity and coverage of training data should be considered alongside understanding the characteristics of the underperforming source domains.
 
-The final evaluation produced:
+11. Final Results
+11.1 Final Test Performance
 
-```text
-Test images: 1,695
-Crack-containing images: 1,474
-Detected crack images: 1,302
-Missed crack images: 172
-Background-only images: 221
-False positives: 9
-Correctly rejected backgrounds: 212
-```
+The final held-out test evaluation used:
 
-Key image-level metrics:
+Experiment 1 + confidence threshold 0.07
 
-```text
-Crack Recall: 88.33%
-Crack Miss Rate: 11.67%
-Background Rejection Rate: 95.93%
-False Positive Rate among background images: 4.07%
-```
+Crack-only evaluation
 
----
+For the 1,474 crack images:
 
-## 11.2 Best Validation Configurations
+Mean per-image IoU: 0.3719
+Mean per-image Dice: 0.4907
+Median IoU: 0.3388
+Median Dice: 0.5061
 
-The experiments showed that there was no single configuration that dominated every metric.
+Missed crack images contributed:
 
-### Best validation miss rate
+IoU = 0
+Dice = 0
 
-**Experiment 1 — Small-Crack Focused Augmentation**
+to the crack-only averages.
 
-```text
-Miss rate = 3.93%
-```
+Overall evaluation
 
-### Best Crack Mean IoU
+Across all 1,695 test images, with one empty-empty background case included:
 
-**Experiment 3 — Crack-Focused Cropping**
+Mean IoU: 0.4485
+Mean Dice: 0.5518
+Image-level results
+Detected crack images: 1,302 / 1,474
+Missed crack images: 172 / 1,474
+Detection/recall: 88.33%
+Background correctly rejected: 212 / 221
+False positives: 9 / 221
+Background rejection: 95.93%
+Background false-positive rate: 4.07%
 
-```text
-Crack Mean IoU = 0.5691
-```
+These detection results should not be interpreted as equivalent to segmentation accuracy because "detected" means that the model produced any non-empty predicted mask.
 
-### Best Mask mAP50-95
+11.2 Best Validation Configurations
 
-**Experiment 3 — Crack-Focused Cropping**
+At the common confidence threshold of 0.25:
 
-```text
-Mask mAP50-95 = 0.1010
-```
+Experiment	Crack IoU	Crack Dice	Missed	Miss Rate	FP	mAP50	mAP50-95
+Baseline	0.5588	0.6859	31	6.77%	0	0.319	0.0969
+Exp1	0.5677	0.6992	18	3.93%	1	0.327	0.0986
+Exp2	0.5507	0.6782	34	7.42%	0	0.310	0.0937
+Exp3	0.5691	0.6976	23	5.02%	3	0.323	0.1010
 
-### Worst-performing controlled modification
+Exp1 was selected because it provided the lowest miss rate and fewest missed crack images at the common comparison threshold while also achieving the highest mAP50.
 
-**Experiment 2 — No-Mosaic Ablation**
+Exp3 had slightly higher IoU and mAP50-95, but its higher miss count and false-positive count made Exp1 the more practical choice for the next evaluation stage.
 
-```text
-Crack Mean IoU = 0.5507
-Miss rate = 7.42%
-Mask mAP50-95 = 0.0937
-```
+11.3 Final Operating Configuration
 
----
+The final operating configuration was:
 
-## 11.3 Final Operating Configuration
-
-The final inference configuration used:
-
-```text
 Model: YOLO11s-seg
+Selected experiment: Exp1 — Combined Augmentation Configuration
+Input size: 448 × 448
 Confidence threshold: 0.07
-```
 
-The threshold was selected as the final operating configuration during the project workflow.
+The retained Exp1 validation threshold sweep was:
 
-The exact validation sweep that produced the threshold choice was not retained sufficiently to support the previously stated 0.87% miss-rate figure, so that value is intentionally not presented as a verified result.
+Confidence	Crack IoU	Missed / 458	FP / 239
+0.05	0.5901	2	8
+0.07	0.5908	4	7
+0.10	0.5893	5	5
+0.15	0.5850	7	3
+0.20	0.5774	10	1
+0.25	0.5677	18	1
+0.30	0.5544	30	0
+0.40	0.5006	77	0
 
----
+The selected threshold of 0.07 produced the highest mean per-image crack IoU in the retained validation sweep:
 
-# 12. Conclusion
+0.5908
 
-This project evolved from a raw crack-image dataset into a reproducible segmentation pipeline through a sequence of data investigation, controlled dataset preparation, model training, experimentation, and error analysis.
+At this threshold:
 
-The most important engineering lesson was that the dataset required investigation before model training.
+Missed crack images: 4 / 458
+Miss rate: 0.87%
+Background false positives: 7 / 239
 
-The initial directory structure suggested a severe annotation problem because the training directory contained thousands of images but only a small number of local masks. A global audit showed that the image-mask collection was actually complete, revealing that the primary issue was **dataset organization rather than missing annotations**.
+The final threshold was selected using validation data only.
 
-This led to a reproducible preparation strategy based on global image-mask matching instead of destructive manual restructuring.
+This should be understood as a practical project decision rather than a formally pre-registered optimization rule.
 
-The resulting pipeline then:
+The threshold sweep was performed only for Exp1, so it does not constitute a fair per-experiment optimal-threshold comparison.
 
-1. audited the raw dataset,
-2. analyzed mask structure,
-3. identified background images,
-4. locked the test set,
-5. constructed train/validation subsets,
-6. converted raster masks into YOLO segmentation labels,
-7. validated the generated dataset,
-8. checked for leakage,
-9. trained a baseline,
-10. conducted three controlled experiments,
-11. evaluated segmentation at pixel level,
-12. analyzed errors by source domain,
-13. and evaluated the final system on a held-out test set.
+The held-out test set was not used to select the threshold.
 
-The experiments also demonstrated that model improvement involved trade-offs.
+11.4 Source-Level Final Result
 
-Small-crack-focused augmentation improved validation crack detection and reduced the miss rate from the baseline.
+The final test results demonstrate a substantial difference between source domains.
 
-Removing Mosaic produced worse results, particularly on the evaluated very-small crack subset.
+The strongest-performing sources included:
 
-Crack-focused cropping achieved the highest Crack Mean IoU and Mask mAP50-95 and improved some very-small crack cases, but it also increased false positives.
+CRACK500: 0.6054 IoU
+DeepCrack: 0.6000 IoU
 
-The final test evaluation showed:
+while several sources were substantially harder:
 
-```text
-88.33% image-level recall on crack-containing images
-95.93% background rejection
-11.67% crack miss rate
-4.07% false-positive rate among background images
-```
+Rissbilder: 0.2038 IoU
+GAPS384: 0.2641 IoU
+Sylvie Chambon: 0.1002 IoU
+CrackTree200: 0.0548 IoU
 
-Most importantly, the error analysis revealed that the majority of missed cracks came from specific source domains, with **Rissbilder and GAPS384 accounting for 88.37% of all missed crack images**.
+Rissbilder was the dominant source of missed detections:
 
-This shifts the direction of future work from simply "train a stronger model" toward more targeted improvements in:
+136 / 172 misses = 79.07%
 
-* domain generalization,
-* small-crack representation,
-* hard-negative handling,
-* threshold calibration,
-* and deployment-oriented evaluation.
+despite representing only:
 
-The project therefore demonstrates not only a trained segmentation model, but a complete **evidence-driven computer vision engineering workflow** in which dataset problems, model behavior, experimental results, and deployment limitations are explicitly investigated and documented.
+567 / 1,474 = 38.5%
+
+of the test crack images.
+
+This strongly suggests that overall performance is driven not only by crack size, but also by source-specific characteristics and domain differences.
+
+12. Conclusion
+
+This project developed a complete crack-segmentation pipeline extending from raw dataset investigation to held-out test evaluation.
+
+The work demonstrated that model performance cannot be understood from a single validation metric alone.
+
+Several engineering findings were particularly important:
+
+The original dataset contained 11,298 images and masks, but the initial directory structure did not represent the complete annotation organization.
+A global filename-based image-mask lookup was necessary to recover valid image-mask relationships.
+The working dataset contained 5,188 images, leaving 6,110 original images unused.
+The dataset contained 1,454 empty masks, of which 1,411 were associated with noncrack filenames and 43 remained ambiguous.
+The four model configurations showed relatively small differences at the common validation threshold.
+Exp1 was selected because it achieved the lowest miss rate and fewest missed crack images at confidence 0.25.
+Exp3 achieved slightly higher overall validation IoU than Exp1, but its results did not demonstrate a general improvement on the very-small subset. On the same 8-image subset:
+Exp1: 0.2523
+Exp3: 0.1759
+
+Removing Mosaic in Exp2 was associated with a substantial drop on the same small eight-image subset:
+
+Exp1: 0.2523
+Exp2: 0.0000
+
+This is an indicator rather than conclusive evidence because the subset contains only eight images.
+
+The retained Exp1 validation sweep identified 0.07 as the selected operating threshold, where:
+mean crack IoU = 0.5908
+missed = 4 / 458
+miss rate = 0.87%
+false positives = 7 / 239
+On the held-out test set at confidence 0.07, crack-only mean IoU dropped to 0.3719, while Dice dropped to 0.4907.
+The final model detected 88.33% of crack images and rejected 95.93% of background images.
+The validation-to-test gap is substantial and indicates that validation performance does not fully represent cross-source generalization.
+Rissbilder represents only 38.5% of the test crack images but contributes 79.07% of all missed crack images, making it the dominant source of failure.
+Crack size alone does not explain the errors: 139 of 172 misses (81%) occur in the Medium crack-size category.
+The large difference in ground-truth polygon fragmentation between validation and test suggests that annotation structure and source-specific characteristics may also influence segmentation quality.
+
+Overall, the project should not be interpreted as having solved crack segmentation for arbitrary infrastructure imagery. Instead, it provides an evidence-based baseline and a structured diagnostic pipeline that reveals where the current model succeeds, where it fails, and what should be investigated next.
+
+The most important next steps are to investigate the 6,110 unused images, review the 43 ambiguous empty masks, analyze the severe Rissbilder failure pattern, investigate test-label fragmentation, strengthen leakage detection, and repeat key experiments across multiple random seeds.
+
+The central engineering lesson is that improving a segmentation system requires more than changing model settings: it requires understanding the dataset, annotation process, source-domain differences, evaluation methodology, and the operational meaning of detection versus accurate segmentation.
